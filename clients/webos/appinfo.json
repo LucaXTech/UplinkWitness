@@ -5,12 +5,10 @@
   "type": "web",
   "main": "index.html",
   "title": "UplinkWitness TV",
-  "appDescription": "TV client for the UplinkWitness Internet connection black box",
+  "appDescription": "TV client for the UplinkWitness connection black box",
   "icon": "icon.png",
   "largeIcon": "largeicon.png",
   "iconColor": "#111827",
   "resolution": "1920x1080",
-  "splashBackground": "splash.png",
-  "splashColor": "#070b14",
   "transparent": false
 }
