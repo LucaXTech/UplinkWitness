@@ -198,6 +198,24 @@ def temperature_stats(conn, hours=24):
     }
 
 
+def history_rows(conn, since):
+    temp_expr = (
+        "router_cpu_temp_c"
+        if has_column(conn, "samples", "router_cpu_temp_c")
+        else "NULL AS router_cpu_temp_c"
+    )
+    return conn.execute(
+        f"""
+        SELECT ts, gateway_ms, internet_ms, gateway_ok, internet_ok,
+               dns_ok, http_ok, wan_status, {temp_expr}
+        FROM samples
+        WHERE ts >= ?
+        ORDER BY ts ASC
+        """,
+        (since,),
+    ).fetchall()
+
+
 def fritz_telemetry_present(sample):
     if sample is None:
         return False
@@ -413,16 +431,7 @@ def api_history():
         datetime.now(timezone.utc) - timedelta(hours=hours)
     ).astimezone().isoformat(timespec="seconds")
     conn = db()
-    rows = conn.execute(
-        """
-        SELECT ts, gateway_ms, internet_ms, gateway_ok, internet_ok,
-               dns_ok, http_ok, wan_status
-        FROM samples
-        WHERE ts >= ?
-        ORDER BY ts ASC
-        """,
-        (since,),
-    ).fetchall()
+    rows = history_rows(conn, since)
     conn.close()
 
     if len(rows) > 1200:

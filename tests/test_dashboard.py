@@ -46,6 +46,59 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(stats["samples"], 3)
         conn.close()
 
+    def test_history_rows_include_temperature(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE samples(
+                id INTEGER PRIMARY KEY,
+                ts TEXT,
+                gateway_ms REAL,
+                internet_ms REAL,
+                gateway_ok INTEGER,
+                internet_ok INTEGER,
+                dns_ok INTEGER,
+                http_ok INTEGER,
+                wan_status TEXT,
+                router_cpu_temp_c REAL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO samples(ts,gateway_ok,internet_ok,dns_ok,http_ok,router_cpu_temp_c) VALUES(?,?,?,?,?,?)",
+            ("2026-09-06T10:00:00+02:00", 1, 1, 1, 1, 107.0),
+        )
+        rows = dashboard.history_rows(conn, "2026-09-06T00:00:00+02:00")
+        self.assertEqual(rows[0]["router_cpu_temp_c"], 107.0)
+        conn.close()
+
+    def test_history_rows_keep_legacy_schema_compatible(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE samples(
+                id INTEGER PRIMARY KEY,
+                ts TEXT,
+                gateway_ms REAL,
+                internet_ms REAL,
+                gateway_ok INTEGER,
+                internet_ok INTEGER,
+                dns_ok INTEGER,
+                http_ok INTEGER,
+                wan_status TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO samples(ts,gateway_ok,internet_ok,dns_ok,http_ok) VALUES(?,?,?,?,?)",
+            ("2026-09-06T10:00:00+02:00", 1, 1, 1, 1),
+        )
+        rows = dashboard.history_rows(conn, "2026-09-06T00:00:00+02:00")
+        self.assertIsNone(rows[0]["router_cpu_temp_c"])
+        conn.close()
+
     def test_uplinkwitness_dashboard_branding(self):
         template = (Path(__file__).resolve().parents[1] / "templates" / "index.html").read_text(
             encoding="utf-8"
@@ -53,6 +106,7 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("<title>UplinkWitness</title>", template)
         self.assertIn("<h1>UplinkWitness</h1>", template)
         self.assertNotIn("<h1>LineWatch</h1>", template)
+        self.assertIn('id="tempChart"', template)
         self.assertIn("router_cpu_temp_c", template)
 
 
