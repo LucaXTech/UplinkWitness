@@ -9,16 +9,12 @@ import socket
 import sqlite3
 import subprocess
 import time
-import urllib.request
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-try:
-    from fritzconnection import FritzConnection
-except ImportError:  # Generic mode can run without the optional FRITZ!Box adapter.
-    FritzConnection = None
+from router_adapters import FritzAdapter, latest_cpu_temperature
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
@@ -32,6 +28,9 @@ SAVE_EVERY = float(os.getenv("LINEWATCH_HEALTHY_PERSIST_SECONDS", "30"))
 FRITZ_EVERY = float(os.getenv("LINEWATCH_FRITZ_POLL_SECONDS", "10"))
 FRITZ_TEMP_EVERY = float(os.getenv("LINEWATCH_FRITZ_TEMP_SECONDS", "60"))
 PUBLIC_IP_EVERY = float(os.getenv("LINEWATCH_PUBLIC_IP_SECONDS", "300"))
+TCP_EVERY = float(os.getenv("LINEWATCH_TCP_SECONDS", "10"))
+IPV6_EVERY = float(os.getenv("LINEWATCH_IPV6_SECONDS", "10"))
+QUALITY_WINDOW_SECONDS = float(os.getenv("LINEWATCH_QUALITY_WINDOW_SECONDS", "300"))
 RING_SECONDS = float(os.getenv("LINEWATCH_RING_SECONDS", "120"))
 ROUTER_MODE = os.getenv("LINEWATCH_ROUTER_MODE", "auto").strip().lower() or "auto"
 GATEWAY_PROBE = os.getenv("LINEWATCH_GATEWAY_PROBE", "auto").strip().lower() or "auto"
@@ -44,17 +43,26 @@ PING_TARGETS = [
     for x in os.getenv("LINEWATCH_PING_TARGETS", "1.1.1.1,8.8.8.8").split(",")
     if x.strip()
 ]
+IPV6_PING_TARGETS = [
+    x.strip()
+    for x in os.getenv(
+        "LINEWATCH_IPV6_PING_TARGETS",
+        "2606:4700:4700::1111,2001:4860:4860::8888",
+    ).split(",")
+    if x.strip()
+]
+TCP_HOST = os.getenv("LINEWATCH_TCP_HOST", "1.1.1.1").strip()
+TCP_PORT = int(os.getenv("LINEWATCH_TCP_PORT", "443"))
 DNS_NAME = os.getenv("LINEWATCH_DNS_NAME", "www.cloudflare.com")
 HTTP_URL = os.getenv(
     "LINEWATCH_HTTP_URL", "https://connectivitycheck.gstatic.com/generate_204"
 )
 PUBLIC_IP_URL = os.getenv("LINEWATCH_PUBLIC_IP_URL", "https://api.ipify.org")
+USER_AGENT = "UplinkWitness/1.3.0"
 STOP = False
 
 ROUTER_MODES = {"auto", "generic", "fritz"}
 GATEWAY_PROBE_MODES = {"auto", "on", "off"}
-
-# Stronger evidence replaces weaker classifications for one continuous outage.
 INCIDENT_PRIORITY = {
     "HTTP_CONNECTIVITY_FAILURE": 10,
     "DNS_FAILURE": 20,
@@ -63,33 +71,73 @@ INCIDENT_PRIORITY = {
     "GATEWAY_UNREACHABLE": 50,
     "NETWORK_LINK_DOWN": 60,
 }
-REBOOT_ASSOCIATION_SECONDS = max(180.0, RING_SECONDS)
 REBOOT_ASSOCIATION_TOLERANCE_SECONDS = max(15.0, FRITZ_EVERY * 2)
+
+SAMPLE_MIGRATIONS = {
+    "router_cpu_temp_c": "REAL",
+    "tcp_ok": "INTEGER",
+    "tcp_ms": "REAL",
+    "ipv6_ok": "INTEGER",
+    "ipv6_ms": "REAL",
+    "icmp_loss_pct": "REAL",
+    "icmp_jitter_ms": "REAL",
+    "interface_speed_mbps": "REAL",
+    "interface_duplex": "TEXT",
+    "gateway_neighbor_state": "TEXT",
+    "wan_access_type": "TEXT",
+    "wan_physical_status": "TEXT",
+    "wan_down_bytes_s": "REAL",
+    "wan_up_bytes_s": "REAL",
+    "wan_sync_group": "TEXT",
+    "wan_sync_mode": "TEXT",
+    "fiber_rx_dbm": "REAL",
+    "fiber_tx_dbm": "REAL",
+    "fiber_rx_low_dbm": "REAL",
+    "fiber_rx_high_dbm": "REAL",
+    "fiber_tx_low_dbm": "REAL",
+    "fiber_tx_high_dbm": "REAL",
+    "fiber_mode": "TEXT",
+    "fiber_resyncs": "INTEGER",
+    "fiber_errors_rx": "INTEGER",
+    "fiber_errors_tx": "INTEGER",
+}
 
 
 def now():
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
-def default_route():
-    """Return (gateway IPv4, interface) for the host default route."""
+def default_route(family=4):
+    """Return (gateway, interface) for the first default route of an IP family."""
+    flag = "-6" if int(family) == 6 else "-4"
     try:
         out = subprocess.check_output(
-            ["ip", "-4", "route", "show", "default"], text=True, timeout=2
+            ["ip", flag, "route", "show", "default"], text=True, timeout=2
         )
         line = next((line for line in out.splitlines() if line.strip()), "")
-        gw_match = re.search(r"\bvia\s+(\d+\.\d+\.\d+\.\d+)", line)
-        dev_match = re.search(r"\bdev\s+(\S+)", line)
-        return (
-            gw_match.group(1) if gw_match else None,
-            dev_match.group(1) if dev_match else None,
-        )
+        if not line:
+            return None, None
+        parts = line.split()
+        gateway = parts[parts.index("via") + 1] if "via" in parts else None
+        interface = parts[parts.index("dev") + 1] if "dev" in parts else None
+        return gateway, interface
     except Exception:
         return None, None
 
 
+def route_change(previous, current):
+    """Describe a route replacement, disappearance or restoration after baseline."""
+    if previous is None or current is None or previous == current:
+        return None
+    return {
+        "previous_gateway": previous[0],
+        "previous_interface": previous[1],
+        "new_gateway": current[0],
+        "new_interface": current[1],
+    }
+
+
 def carrier(interface):
-    """Read Linux link carrier when sysfs exposes it; otherwise return unknown."""
     if not interface:
         return None
     try:
@@ -100,16 +148,61 @@ def carrier(interface):
         return None
 
 
-def ping(host):
+def interface_details(interface, sysfs_root=Path("/sys/class/net")):
+    if not interface:
+        return None, None
+    base = Path(sysfs_root) / interface
+    speed = duplex = None
+    try:
+        value = float((base / "speed").read_text().strip())
+        if value > 0:
+            speed = value
+    except Exception:
+        pass
+    try:
+        value = (base / "duplex").read_text().strip().lower()
+        if value in {"full", "half"}:
+            duplex = value
+    except Exception:
+        pass
+    return speed, duplex
+
+
+def neighbor_state(gateway):
+    if not gateway:
+        return None
+    try:
+        out = subprocess.check_output(
+            ["ip", "neigh", "show", gateway], text=True, timeout=2
+        ).strip()
+    except Exception:
+        return None
+    known = {
+        "INCOMPLETE",
+        "REACHABLE",
+        "STALE",
+        "DELAY",
+        "PROBE",
+        "FAILED",
+        "NOARP",
+        "PERMANENT",
+    }
+    for token in reversed(out.split()):
+        token = token.upper()
+        if token in known:
+            return token
+    return None
+
+
+def ping(host, family=4):
     if not host:
         return 0, None
+    cmd = ["ping"]
+    if int(family) == 6:
+        cmd.append("-6")
+    cmd += ["-n", "-c", "1", "-W", "1", host]
     try:
-        p = subprocess.run(
-            ["ping", "-n", "-c", "1", "-W", "1", host],
-            capture_output=True,
-            text=True,
-            timeout=2.5,
-        )
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=2.5)
         if p.returncode:
             return 0, None
         m = re.search(r"time[=<]([\d.]+)\s*ms", p.stdout)
@@ -118,33 +211,71 @@ def ping(host):
         return 0, None
 
 
+def quality_window_stats(probes):
+    """Return loss and jitter from every live ICMP probe in the rolling window.
+
+    Jitter is the mean absolute latency delta only across adjacent successful
+    probes; a failed probe breaks the latency sequence instead of being skipped.
+    """
+    if not probes:
+        return None, None
+    success_count = sum(1 for _, ok, _ in probes if ok)
+    loss_pct = round(100.0 * (len(probes) - success_count) / len(probes), 2)
+    deltas = []
+    previous_ms = None
+    for _, ok, ms in probes:
+        if not ok or ms is None:
+            previous_ms = None
+            continue
+        current_ms = float(ms)
+        if previous_ms is not None:
+            deltas.append(abs(current_ms - previous_ms))
+        previous_ms = current_ms
+    jitter_ms = round(sum(deltas) / len(deltas), 2) if deltas else None
+    return loss_pct, jitter_ms
+
+
+def tcp_check(host=None, port=None):
+    host = TCP_HOST if host is None else host
+    port = TCP_PORT if port is None else int(port)
+    if not host:
+        return 0, None
+    start = time.monotonic()
+    try:
+        with socket.create_connection((host, port), timeout=2.5):
+            pass
+        return 1, round((time.monotonic() - start) * 1000, 2)
+    except Exception:
+        return 0, None
+
+
 def dns_check():
-    t = time.monotonic()
+    start = time.monotonic()
     try:
         socket.getaddrinfo(DNS_NAME, 443, type=socket.SOCK_STREAM)
-        return 1, round((time.monotonic() - t) * 1000, 2)
+        return 1, round((time.monotonic() - start) * 1000, 2)
     except Exception:
         return 0, None
 
 
 def http_check():
-    t = time.monotonic()
+    import urllib.request
+
+    start = time.monotonic()
     try:
-        req = urllib.request.Request(
-            HTTP_URL, headers={"User-Agent": "UplinkWitness/1.2.1"}
-        )
+        req = urllib.request.Request(HTTP_URL, headers={"User-Agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=3) as response:
             response.read(32)
-        return 1, round((time.monotonic() - t) * 1000, 2)
+        return 1, round((time.monotonic() - start) * 1000, 2)
     except Exception:
         return 0, None
 
 
 def public_ip():
+    import urllib.request
+
     try:
-        req = urllib.request.Request(
-            PUBLIC_IP_URL, headers={"User-Agent": "UplinkWitness/1.2.1"}
-        )
+        req = urllib.request.Request(PUBLIC_IP_URL, headers={"User-Agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=3) as response:
             return response.read(128).decode().strip() or None
     except Exception:
@@ -181,21 +312,18 @@ def resolve_gateway_probe(mode=None):
     return None
 
 
-def latest_cpu_temperature(values):
-    """Return the newest valid CPU temperature in Celsius, else None."""
-    if not values:
-        return None
-    try:
-        value = float(values[0])
-    except (TypeError, ValueError):
-        return None
-    if not (0 < value < 250):
-        return None
-    return round(value, 1)
+class Fritz(FritzAdapter):
+    def __init__(self, host, user=None, password=None, **kwargs):
+        super().__init__(
+            host,
+            FRITZ_USER if user is None else user,
+            FRITZ_PASSWORD if password is None else password,
+            temp_interval=kwargs.pop("temp_interval", FRITZ_TEMP_EVERY),
+            **kwargs,
+        )
 
 
 def ip_change(previous, current):
-    """Return (old, new) only for a real same-source non-empty IP change."""
     if previous and current and previous != current:
         return previous, current
     return None
@@ -227,8 +355,9 @@ def update_event(conn, event_id, *, kind=None, details=None):
     conn.commit()
 
 
-def apply_incident_classification(conn, event_id, current_kind, details, ts, new_kind):
-    """Record observed classification and escalate the existing outage row if needed."""
+def apply_incident_classification(
+    conn, event_id, current_kind, details, ts, new_kind
+):
     before = len(details.get("classification_history", []))
     record_classification(details, ts, new_kind)
     history_changed = len(details.get("classification_history", [])) != before
@@ -246,7 +375,7 @@ def apply_incident_classification(conn, event_id, current_kind, details, ts, new
 class Sample:
     ts: str
     carrier: Optional[int]
-    gateway: str
+    gateway: Optional[str]
     gateway_ok: int
     gateway_ms: Optional[float]
     internet_ok: int
@@ -267,6 +396,31 @@ class Sample:
     pppoe_ac_name: Optional[str]
     fritz_error: Optional[str]
     router_cpu_temp_c: Optional[float] = None
+    tcp_ok: Optional[int] = None
+    tcp_ms: Optional[float] = None
+    ipv6_ok: Optional[int] = None
+    ipv6_ms: Optional[float] = None
+    icmp_loss_pct: Optional[float] = None
+    icmp_jitter_ms: Optional[float] = None
+    interface_speed_mbps: Optional[float] = None
+    interface_duplex: Optional[str] = None
+    gateway_neighbor_state: Optional[str] = None
+    wan_access_type: Optional[str] = None
+    wan_physical_status: Optional[str] = None
+    wan_down_bytes_s: Optional[float] = None
+    wan_up_bytes_s: Optional[float] = None
+    wan_sync_group: Optional[str] = None
+    wan_sync_mode: Optional[str] = None
+    fiber_rx_dbm: Optional[float] = None
+    fiber_tx_dbm: Optional[float] = None
+    fiber_rx_low_dbm: Optional[float] = None
+    fiber_rx_high_dbm: Optional[float] = None
+    fiber_tx_low_dbm: Optional[float] = None
+    fiber_tx_high_dbm: Optional[float] = None
+    fiber_mode: Optional[str] = None
+    fiber_resyncs: Optional[int] = None
+    fiber_errors_rx: Optional[int] = None
+    fiber_errors_tx: Optional[int] = None
 
 
 def _ensure_sample_column(conn, name, definition):
@@ -285,9 +439,16 @@ def connect_db(path=None):
           internet_ok INTEGER, internet_ms REAL, dns_ok INTEGER, dns_ms REAL, http_ok INTEGER, http_ms REAL,
           public_ip TEXT, router_uptime_s INTEGER, router_model TEXT, fritzos TEXT, wan_status TEXT,
           wan_uptime_s INTEGER, wan_ip TEXT, wan_last_error TEXT, wan_transport TEXT, pppoe_ac_name TEXT,
-          fritz_error TEXT, router_cpu_temp_c REAL)"""
+          fritz_error TEXT, router_cpu_temp_c REAL, tcp_ok INTEGER, tcp_ms REAL, ipv6_ok INTEGER,
+          ipv6_ms REAL, icmp_loss_pct REAL, icmp_jitter_ms REAL, interface_speed_mbps REAL,
+          interface_duplex TEXT, gateway_neighbor_state TEXT, wan_access_type TEXT, wan_physical_status TEXT,
+          wan_down_bytes_s REAL, wan_up_bytes_s REAL, wan_sync_group TEXT, wan_sync_mode TEXT,
+          fiber_rx_dbm REAL, fiber_tx_dbm REAL, fiber_rx_low_dbm REAL, fiber_rx_high_dbm REAL,
+          fiber_tx_low_dbm REAL, fiber_tx_high_dbm REAL, fiber_mode TEXT, fiber_resyncs INTEGER,
+          fiber_errors_rx INTEGER, fiber_errors_tx INTEGER)"""
     )
-    _ensure_sample_column(conn, "router_cpu_temp_c", "REAL")
+    for name, definition in SAMPLE_MIGRATIONS.items():
+        _ensure_sample_column(conn, name, definition)
     conn.execute(
         """CREATE TABLE IF NOT EXISTS events(
           id INTEGER PRIMARY KEY, start_ts TEXT, end_ts TEXT, duration_s REAL, event_type TEXT, details_json TEXT)"""
@@ -329,7 +490,6 @@ def close_event(conn, event_id, details, duration, end=None):
 
 
 def estimated_router_boot_time(detected_ts, current_router_uptime_s):
-    """Estimate the router boot timestamp from detection time and current uptime."""
     try:
         detected = datetime.fromisoformat(detected_ts)
         uptime = float(current_router_uptime_s)
@@ -346,21 +506,24 @@ def _incident_matches_boot(start_ts, end_ts, boot_time, tolerance_s):
         end = datetime.fromisoformat(end_ts) if end_ts else None
     except (TypeError, ValueError):
         return False
-    lower = start - timedelta(seconds=tolerance_s)
-    upper = (end or boot_time) + timedelta(seconds=tolerance_s)
-    return lower <= boot_time <= upper
+    return start - timedelta(seconds=tolerance_s) <= boot_time <= (
+        end or boot_time
+    ) + timedelta(seconds=tolerance_s)
 
 
 def associate_reboot_with_incident(
-    conn, reboot_event_id, detected_ts, reboot_details, open_event_id=None, open_details=None
+    conn,
+    reboot_event_id,
+    detected_ts,
+    reboot_details,
+    open_event_id=None,
+    open_details=None,
 ):
-    """Attach a confirmed reboot to the outage containing the estimated boot time."""
     boot_time = estimated_router_boot_time(
         detected_ts, reboot_details.get("current_router_uptime_s")
     )
     if boot_time is None:
         return None
-
     association = {
         "event_id": reboot_event_id,
         "detected_ts": detected_ts,
@@ -368,7 +531,6 @@ def associate_reboot_with_incident(
         "previous_router_uptime_s": reboot_details.get("previous_router_uptime_s"),
         "current_router_uptime_s": reboot_details.get("current_router_uptime_s"),
     }
-
     if open_event_id is not None and open_details is not None:
         row = conn.execute(
             "SELECT start_ts FROM events WHERE id=?", (open_event_id,)
@@ -379,16 +541,12 @@ def associate_reboot_with_incident(
             open_details["confirmed_router_reboot"] = association
             update_event(conn, open_event_id, details=open_details)
             return open_event_id
-
     rows = conn.execute(
-        """SELECT id,start_ts,end_ts,details_json
-           FROM events
-           WHERE duration_s IS NOT NULL
-             AND event_type IN (?,?,?,?,?,?)
+        """SELECT id,start_ts,end_ts,details_json FROM events
+           WHERE duration_s IS NOT NULL AND event_type IN (?,?,?,?,?,?)
            ORDER BY end_ts DESC LIMIT 20""",
         tuple(INCIDENT_PRIORITY),
     ).fetchall()
-
     exact = []
     tolerant = []
     for row in rows:
@@ -403,13 +561,14 @@ def associate_reboot_with_incident(
         if _incident_matches_boot(
             row[1], row[2], boot_time, REBOOT_ASSOCIATION_TOLERANCE_SECONDS
         ):
-            distance = min(abs((boot_time - start).total_seconds()), abs((boot_time - end).total_seconds()))
+            distance = min(
+                abs((boot_time - start).total_seconds()),
+                abs((boot_time - end).total_seconds()),
+            )
             tolerant.append((row, distance))
-
     candidates = exact or sorted(tolerant, key=lambda item: item[1])
     if not candidates:
         return None
-
     row = candidates[0][0]
     try:
         details = json.loads(row[3] or "{}")
@@ -425,99 +584,15 @@ def associate_reboot_with_incident(
     return row[0]
 
 
-class Fritz:
-    def __init__(self, host):
-        self.host = host
-        self.fc = None
-        self.wan = None
-        self.last_temp = None
-        self.last_temp_poll = 0.0
-
-    def _connect(self):
-        if FritzConnection is None:
-            raise RuntimeError(
-                "FRITZ!Box support requires the 'fritzconnection' Python package"
-            )
-        self.fc = FritzConnection(
-            address=self.host,
-            user=FRITZ_USER,
-            password=FRITZ_PASSWORD,
-            timeout=4,
-        )
-        candidates = [
-            service
-            for service in self.fc.services
-            if "WANPPPConnection" in service or "WANIPConnection" in service
-        ]
-        self.wan = None
-        for service in candidates:
-            try:
-                info = self.fc.call_action(service, "GetInfo")
-                if info.get("NewEnable") and str(info.get("NewName", "")).lower() == "internet":
-                    self.wan = service
-                    break
-                if info.get("NewEnable") and not self.wan:
-                    self.wan = service
-            except Exception:
-                pass
-
-    def _cpu_temperature(self):
-        mono = time.monotonic()
-        if self.last_temp is not None and mono - self.last_temp_poll < FRITZ_TEMP_EVERY:
-            return self.last_temp
-        self.last_temp_poll = mono
-        try:
-            value = latest_cpu_temperature(self.fc.get_cpu_temperatures())
-            if value is not None:
-                self.last_temp = value
-        except Exception:
-            pass
-        return self.last_temp
-
-    def snapshot(self):
-        try:
-            if not self.fc:
-                self._connect()
-            device = self.fc.call_action("DeviceInfo1", "GetInfo")
-            out = {
-                "router_uptime_s": device.get("NewUpTime"),
-                "router_model": device.get("NewModelName"),
-                "fritzos": device.get("NewSoftwareVersion"),
-            }
-            if self.wan:
-                wan = self.fc.call_action(self.wan, "GetInfo")
-                out.update(
-                    wan_status=wan.get("NewConnectionStatus"),
-                    wan_uptime_s=wan.get("NewUptime"),
-                    wan_ip=wan.get("NewExternalIPAddress"),
-                    wan_last_error=wan.get("NewLastConnectionError"),
-                    wan_transport=wan.get("NewTransportType"),
-                    pppoe_ac_name=wan.get("NewPPPoEACName"),
-                )
-            out["router_cpu_temp_c"] = self._cpu_temperature()
-            try:
-                log = self.fc.call_action("DeviceInfo1", "GetDeviceLog").get(
-                    "NewDeviceLog"
-                )
-            except Exception:
-                log = None
-            out["fritz_error"] = None
-            return out, log
-        except Exception as exc:
-            self.fc = None
-            self.wan = None
-            self.last_temp = None
-            self.last_temp_poll = 0.0
-            return {"fritz_error": f"{type(exc).__name__}: {exc}"}, None
-
-
 def classify(sample, gateway_probe_active=True):
-    """Classify an incident without assuming every network permits ICMP."""
+    """Classify incidents from synchronous core probes and router state.
+
+    TCP/IPv6 are auxiliary evidence sampled at their own cadence. They are not
+    allowed to mask a current outage classification with a cached older result.
+    """
     if sample.carrier == 0:
         return "NETWORK_LINK_DOWN"
-
     internet_paths_ok = bool(sample.internet_ok or sample.dns_ok or sample.http_ok)
-
     if gateway_probe_active and not sample.gateway_ok and not internet_paths_ok:
         return "GATEWAY_UNREACHABLE"
     if sample.wan_status and sample.wan_status != "Connected":
@@ -528,8 +603,6 @@ def classify(sample, gateway_probe_active=True):
         return "DNS_FAILURE"
     if not sample.http_ok:
         return "HTTP_CONNECTIVITY_FAILURE"
-
-    # ICMP may be blocked even when DNS and HTTP are healthy.
     return "OK"
 
 
@@ -541,7 +614,8 @@ def bundle(event_id, samples, log, details):
     )
     (directory / "samples.jsonl").write_text(
         "".join(
-            json.dumps(asdict(sample), ensure_ascii=False) + "\n" for sample in samples
+            json.dumps(asdict(sample), ensure_ascii=False) + "\n"
+            for sample in samples
         ),
         encoding="utf-8",
     )
@@ -553,24 +627,25 @@ def main():
     global STOP
     signal.signal(signal.SIGINT, lambda *_: globals().__setitem__("STOP", True))
     signal.signal(signal.SIGTERM, lambda *_: globals().__setitem__("STOP", True))
-
     try:
         router_mode = resolve_router_mode()
         gateway_probe_active = resolve_gateway_probe()
     except ValueError as exc:
         raise SystemExit(str(exc))
 
-    route_gateway, route_iface = default_route()
+    route_gateway, route_iface = default_route(4)
     if not route_gateway:
         raise SystemExit(
             "No IPv4 default gateway found. Ensure the host has an active network connection."
         )
-
     interface = IFACE or route_iface
     router_host = FRITZ_HOST or route_gateway
-    fritz = Fritz(router_host) if router_mode == "fritz" else None
+    router_adapter = (
+        Fritz(router_host, FRITZ_USER, FRITZ_PASSWORD)
+        if router_mode == "fritz"
+        else None
+    )
     ring_samples = max(1, int(max(RING_SECONDS, POLL) / max(POLL, 0.1)))
-
     probe_label = (
         "auto"
         if gateway_probe_active is None
@@ -581,27 +656,45 @@ def main():
         f"router mode: {router_mode}; gateway probe: {probe_label}",
         flush=True,
     )
-    if fritz:
-        print(f"[UplinkWitness] FRITZ!Box/TR-064 host: {router_host}", flush=True)
+    if router_adapter:
+        print(
+            f"[UplinkWitness] FRITZ!Box/TR-064 host: {router_host}", flush=True
+        )
 
     conn = connect_db()
     state = {}
     last_log = None
-    last_fritz = last_save = last_ip = 0.0
+    last_fritz = last_save = last_ip = last_tcp = last_ipv6 = 0.0
     pub = None
+    tcp_state = (None, None)
+    ipv6_state = (None, None)
     prev_router = prev_wan = None
-    prev_router_wan_ip = None
-    prev_public_ip = None
-    open_event = None
-    open_kind = None
-    open_started = None
+    prev_router_wan_ip = prev_public_ip = None
+    prev_route = (route_gateway, route_iface)
+    prev_wan_physical = prev_wan_access = None
+    prev_link_details = (None, None)
+    open_event = open_kind = open_started = None
     open_details = {}
     history = []
+    probe_window = []
 
     while not STOP:
         cycle = time.monotonic()
         ts = now()
-        current_gateway, current_iface = default_route()
+        current_gateway, current_iface = default_route(4)
+        observed_route = (current_gateway, current_iface)
+        changed_route = route_change(prev_route, observed_route)
+        if changed_route:
+            add_event(
+                conn,
+                "DEFAULT_ROUTE_CHANGED",
+                changed_route,
+                start=ts,
+                end=ts,
+                duration=0,
+            )
+        prev_route = observed_route
+
         gateway = current_gateway or route_gateway
         if current_gateway:
             route_gateway = current_gateway
@@ -609,17 +702,69 @@ def main():
             interface = current_iface
 
         car = carrier(interface)
-        gok, gms = ping(gateway)
+        speed_mbps, duplex = interface_details(interface)
+        link_details = (speed_mbps, duplex)
+        speed_changed = (
+            prev_link_details[0] is not None
+            and speed_mbps is not None
+            and prev_link_details[0] != speed_mbps
+        )
+        duplex_changed = (
+            prev_link_details[1] is not None
+            and duplex is not None
+            and prev_link_details[1] != duplex
+        )
+        if speed_changed or duplex_changed:
+            add_event(
+                conn,
+                "HOST_LINK_PROPERTIES_CHANGED",
+                {
+                    "previous_speed_mbps": prev_link_details[0],
+                    "previous_duplex": prev_link_details[1],
+                    "new_speed_mbps": speed_mbps,
+                    "new_duplex": duplex,
+                    "interface": interface,
+                },
+                start=ts,
+                end=ts,
+                duration=0,
+            )
+        if speed_mbps is not None or duplex is not None:
+            prev_link_details = (
+                speed_mbps if speed_mbps is not None else prev_link_details[0],
+                duplex if duplex is not None else prev_link_details[1],
+            )
 
+        gok, gms = ping(gateway)
+        neigh = neighbor_state(gateway)
         iok = 0
         ims = None
         for target in PING_TARGETS:
             iok, ims = ping(target)
             if iok:
                 break
+        mono = time.monotonic()
+        probe_window.append((mono, iok, ims))
+        cutoff = mono - max(1.0, QUALITY_WINDOW_SECONDS)
+        probe_window = [item for item in probe_window if item[0] >= cutoff]
+        loss_pct, jitter_ms = quality_window_stats(probe_window)
         dok, dms = dns_check()
         hok, hms = http_check()
-        mono = time.monotonic()
+
+        if mono - last_tcp >= TCP_EVERY or tcp_state[0] is None:
+            tcp_state = tcp_check()
+            last_tcp = mono
+        _, ipv6_iface = default_route(6)
+        if ipv6_iface:
+            if mono - last_ipv6 >= IPV6_EVERY or ipv6_state[0] is None:
+                ipv6_state = (0, None)
+                for target in IPV6_PING_TARGETS:
+                    ipv6_state = ping(target, family=6)
+                    if ipv6_state[0]:
+                        break
+                last_ipv6 = mono
+        else:
+            ipv6_state = (None, None)
 
         if GATEWAY_PROBE == "auto" and gateway_probe_active is None:
             if gok:
@@ -639,41 +784,99 @@ def main():
         if mono - last_ip >= PUBLIC_IP_EVERY or pub is None:
             pub = public_ip() or pub
             last_ip = mono
-
-        if fritz and mono - last_fritz >= FRITZ_EVERY:
-            state, log = fritz.snapshot()
+        if router_adapter and mono - last_fritz >= FRITZ_EVERY:
+            state, log = router_adapter.snapshot()
             last_log = log or last_log
             last_fritz = mono
-        elif not fritz:
+        elif not router_adapter:
             state = {}
 
         sample = Sample(
-            ts,
-            car,
-            gateway,
-            gok,
-            gms,
-            iok,
-            ims,
-            dok,
-            dms,
-            hok,
-            hms,
-            pub,
-            state.get("router_uptime_s"),
-            state.get("router_model"),
-            state.get("fritzos"),
-            state.get("wan_status"),
-            state.get("wan_uptime_s"),
-            state.get("wan_ip"),
-            state.get("wan_last_error"),
-            state.get("wan_transport"),
-            state.get("pppoe_ac_name"),
-            state.get("fritz_error"),
-            state.get("router_cpu_temp_c"),
+            ts=ts,
+            carrier=car,
+            gateway=gateway,
+            gateway_ok=gok,
+            gateway_ms=gms,
+            internet_ok=iok,
+            internet_ms=ims,
+            dns_ok=dok,
+            dns_ms=dms,
+            http_ok=hok,
+            http_ms=hms,
+            public_ip=pub,
+            router_uptime_s=state.get("router_uptime_s"),
+            router_model=state.get("router_model"),
+            fritzos=state.get("fritzos"),
+            wan_status=state.get("wan_status"),
+            wan_uptime_s=state.get("wan_uptime_s"),
+            wan_ip=state.get("wan_ip"),
+            wan_last_error=state.get("wan_last_error"),
+            wan_transport=state.get("wan_transport"),
+            pppoe_ac_name=state.get("pppoe_ac_name"),
+            fritz_error=state.get("fritz_error"),
+            router_cpu_temp_c=state.get("router_cpu_temp_c"),
+            tcp_ok=tcp_state[0],
+            tcp_ms=tcp_state[1],
+            ipv6_ok=ipv6_state[0],
+            ipv6_ms=ipv6_state[1],
+            icmp_loss_pct=loss_pct,
+            icmp_jitter_ms=jitter_ms,
+            interface_speed_mbps=speed_mbps,
+            interface_duplex=duplex,
+            gateway_neighbor_state=neigh,
+            wan_access_type=state.get("wan_access_type"),
+            wan_physical_status=state.get("wan_physical_status"),
+            wan_down_bytes_s=state.get("wan_down_bytes_s"),
+            wan_up_bytes_s=state.get("wan_up_bytes_s"),
+            wan_sync_group=state.get("wan_sync_group"),
+            wan_sync_mode=state.get("wan_sync_mode"),
+            fiber_rx_dbm=state.get("fiber_rx_dbm"),
+            fiber_tx_dbm=state.get("fiber_tx_dbm"),
+            fiber_rx_low_dbm=state.get("fiber_rx_low_dbm"),
+            fiber_rx_high_dbm=state.get("fiber_rx_high_dbm"),
+            fiber_tx_low_dbm=state.get("fiber_tx_low_dbm"),
+            fiber_tx_high_dbm=state.get("fiber_tx_high_dbm"),
+            fiber_mode=state.get("fiber_mode"),
+            fiber_resyncs=state.get("fiber_resyncs"),
+            fiber_errors_rx=state.get("fiber_errors_rx"),
+            fiber_errors_tx=state.get("fiber_errors_tx"),
         )
         history.append(sample)
         history = history[-ring_samples:]
+
+        if (
+            prev_wan_physical
+            and sample.wan_physical_status
+            and sample.wan_physical_status != prev_wan_physical
+        ):
+            add_event(
+                conn,
+                "WAN_PHYSICAL_LINK_CHANGED",
+                {
+                    "previous": prev_wan_physical,
+                    "new": sample.wan_physical_status,
+                },
+                start=ts,
+                end=ts,
+                duration=0,
+            )
+        if sample.wan_physical_status:
+            prev_wan_physical = sample.wan_physical_status
+        if (
+            prev_wan_access
+            and sample.wan_access_type
+            and sample.wan_access_type != prev_wan_access
+        ):
+            add_event(
+                conn,
+                "WAN_ACCESS_TYPE_CHANGED",
+                {"previous": prev_wan_access, "new": sample.wan_access_type},
+                start=ts,
+                end=ts,
+                duration=0,
+            )
+        if sample.wan_access_type:
+            prev_wan_access = sample.wan_access_type
 
         router_reboot = False
         if sample.router_uptime_s is not None:
@@ -684,6 +887,8 @@ def main():
                     "previous_router_uptime_s": prev_router,
                     "current_router_uptime_s": router_uptime,
                     "wan_status": sample.wan_status,
+                    "wan_physical_status": sample.wan_physical_status,
+                    "wan_access_type": sample.wan_access_type,
                     "wan_ip": sample.wan_ip,
                     "router_cpu_temp_c": sample.router_cpu_temp_c,
                 }
@@ -717,6 +922,8 @@ def main():
                     "current_wan_uptime_s": wan_uptime,
                     "router_uptime_s": sample.router_uptime_s,
                     "wan_ip": sample.wan_ip,
+                    "wan_physical_status": sample.wan_physical_status,
+                    "wan_access_type": sample.wan_access_type,
                 }
                 event_id = add_event(
                     conn,
@@ -729,14 +936,14 @@ def main():
                 bundle(event_id, history, last_log, details)
             prev_wan = wan_uptime
 
-        router_change = ip_change(prev_router_wan_ip, sample.wan_ip)
-        if router_change:
+        router_ip_change = ip_change(prev_router_wan_ip, sample.wan_ip)
+        if router_ip_change:
             add_event(
                 conn,
                 "WAN_IP_CHANGED",
                 {
-                    "previous": router_change[0],
-                    "new": router_change[1],
+                    "previous": router_ip_change[0],
+                    "new": router_ip_change[1],
                     "source": "router",
                 },
                 start=ts,
@@ -745,7 +952,6 @@ def main():
             )
         if sample.wan_ip:
             prev_router_wan_ip = sample.wan_ip
-
         public_change = ip_change(prev_public_ip, sample.public_ip)
         if public_change:
             add_event(
@@ -794,9 +1000,7 @@ def main():
         if unhealthy or mono - last_save >= SAVE_EVERY:
             save_sample(conn, sample)
             last_save = mono
-
         time.sleep(max(0.1, POLL - (time.monotonic() - cycle)))
-
     conn.close()
 
 
