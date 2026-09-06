@@ -12,7 +12,7 @@ This document separates **verified** configurations from planned or community-re
 
 ## Automated regression coverage
 
-The v1.1.0 regression suite passes 15/15 tests. CI currently runs against Python 3.11 and 3.13.
+The automated regression suite runs in CI against Python 3.11 and 3.13. Test coverage evolves with the project, so this matrix does not pin a stale test-count total to a specific release.
 
 Automated tests complement real network-fault testing; they do not replace it.
 
