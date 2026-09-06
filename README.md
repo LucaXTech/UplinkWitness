@@ -16,9 +16,9 @@ It works with ordinary routers in **generic Linux mode** and becomes more diagno
 
 > **Project rename:** releases through v1.1.0 were published as **LineWatch**. The public project is now **UplinkWitness**. Existing runtime identifiers such as `linewatch.service`, `LINEWATCH_*` environment variables and `data/linewatch.sqlite3` are intentionally retained for upgrade compatibility. See [docs/RENAMING.md](docs/RENAMING.md).
 
-## v1.3 development
+## v1.3 diagnostics
 
-The current v1.3 development branch extends evidence quality without turning UplinkWitness into a general observability stack. It adds:
+The v1.3 baseline extends evidence quality without turning UplinkWitness into a general observability stack. It adds:
 
 - independent TCP-connect evidence alongside ICMP, DNS and HTTP
 - IPv6 reachability when Linux exposes an IPv6 default route
@@ -31,7 +31,7 @@ The current v1.3 development branch extends evidence quality without turning Upl
 - active-fiber optical diagnostics only when the actual WAN access type indicates fiber
 - a dependency-free `/wallboard` intended for large displays and TV browsers such as LG webOS
 
-These features remain **development candidates until physical v1.3 validation is complete**. See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) and [docs/TESTING.md](docs/TESTING.md); the latest tagged stable release remains v1.2.1.
+The v1.3 evidence surface has passed maintainer hardware validation on the ARM64 Raspberry Pi + FRITZ!Box 5530 / FRITZ!OS 8.20 external-ONT deployment. See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) and [docs/TESTING.md](docs/TESTING.md) for the recorded validation scope.
 
 ## Screenshots
 
@@ -45,7 +45,7 @@ These features remain **development candidates until physical v1.3 validation is
   <img src="docs/screenshots/dashboard-mobile.png" alt="UplinkWitness mobile dashboard" width="360">
 </p>
 
-> The screenshots show the FRITZ!Box-enhanced dashboard from the stable v1.2.x baseline. Development UI may contain additional diagnostics.
+> The screenshots predate the additional v1.3 diagnostic cards. The current dashboard may contain more host/WAN evidence than shown here.
 
 ## Why UplinkWitness?
 
@@ -56,8 +56,10 @@ UplinkWitness combines multiple signals and keeps the evidence locally:
 - Linux network-link state when available
 - default-gateway reachability
 - multiple Internet ICMP targets
+- independent TCP-connect evidence
 - DNS resolution
 - HTTP connectivity
+- IPv6 reachability when available
 - public IP changes
 - outage duration and availability
 - optional router/WAN telemetry
@@ -69,9 +71,11 @@ This is particularly useful for short or intermittent faults that disappear befo
 | Capability | Generic Linux | FRITZ!Box enhanced |
 | --- | :---: | :---: |
 | Internet reachability | ✅ | ✅ |
-| DNS / HTTP checks | ✅ | ✅ |
-| Latency history | ✅ | ✅ |
+| TCP / DNS / HTTP checks | ✅ | ✅ |
+| IPv6 reachability when available | ✅ | ✅ |
+| Latency + recent loss/jitter evidence | ✅ | ✅ |
 | Gateway monitoring | ✅ | ✅ |
+| Host link / route evidence | ✅ | ✅ |
 | Public IP changes | ✅ | ✅ |
 | Outage / downtime history | ✅ | ✅ |
 | ISP report + CSV export | ✅ | ✅ |
@@ -79,10 +83,13 @@ This is particularly useful for short or intermittent faults that disappear befo
 | Router uptime / reboot detection | — | ✅ |
 | WAN-session uptime | — | ✅ |
 | WAN / PPPoE reset detection | — | ✅ |
+| Physical WAN / access-type evidence | — | ✅* |
+| WAN activity / Online Monitor context | — | ✅* |
 | Router CPU-temperature telemetry | — | ✅* |
+| Active-fiber optical diagnostics | — | ✅* |
 | FRITZ!Box event log around incidents | — | ✅ |
 
-`*` Best-effort and model/firmware dependent.
+`*` Best-effort and model/firmware/topology dependent.
 
 `LINEWATCH_ROUTER_MODE=auto` selects FRITZ!Box enhanced mode when credentials are configured; otherwise it runs generically.
 
@@ -90,28 +97,33 @@ This is particularly useful for short or intermittent faults that disappear befo
 
 ### On any supported Linux host
 
-Stable v1.2.x detection includes:
+The v1.3 baseline includes:
 
 - local network-link loss when exposed by Linux sysfs
 - gateway reachability changes
 - complete Internet loss
 - DNS failures
 - HTTP connectivity failures
+- independent TCP-connect evidence
+- IPv6 reachability when an IPv6 default route exists
 - public IP changes
 - latency trends
+- recent packet-loss/jitter evidence from every live ICMP probe in a rolling window
+- interface speed/duplex and gateway-neighbour state when Linux exposes them
+- default-route/interface changes, including disappearance/restoration evidence
 - outage duration, total downtime and observed-period availability
 
-The v1.3 development branch additionally records TCP-connect evidence, IPv6 reachability when available, link speed/duplex, gateway-neighbour state, route changes and rolling packet-loss/jitter evidence.
-
 The loss/jitter window uses the raw live ICMP probe cadence rather than the lower-frequency healthy SQLite persistence cadence, avoiding a bias where outage samples would otherwise be over-represented. The default rolling window is 300 seconds and is configurable.
+
+TCP and IPv6 are auxiliary evidence sampled at their own cadence; cached auxiliary results must not mask a current outage classification from the synchronous core probes.
 
 UplinkWitness does **not** assume that every router or Internet path answers ICMP. In automatic gateway-probe mode, a router that drops ping while other connectivity paths remain healthy is not incorrectly classified as down.
 
 ### With FRITZ!Box telemetry
 
-Stable v1.2.x provides:
+FRITZ!Box enhanced mode additionally provides:
 
-- FRITZ!Box reboot through router-uptime reset
+- FRITZ!Box reboot detection through router-uptime reset
 - correlation of a confirmed reboot with the outage that contains the estimated router boot time
 - WAN / PPPoE session reset without a router reboot
 - WAN connection state
@@ -120,8 +132,11 @@ Stable v1.2.x provides:
 - PPPoE access concentrator when exposed
 - FRITZ!Box device logs around incidents when available
 - best-effort CPU-temperature telemetry with 24 h min / average / max and trend history where supported
+- primary physical-WAN evidence from `WANCommonInterfaceConfig`
+- WAN activity and Online Monitor sync context
+- active-only `X_AVM-DE_WANFiber` optical diagnostics when the actual WAN access type indicates fiber
 
-v1.3 development adds primary physical-WAN evidence from `WANCommonInterfaceConfig`, WAN activity/sync context and active-only `X_AVM-DE_WANFiber` optical diagnostics. Service presence alone is never treated as proof that a WAN medium is active.
+Service presence alone is never treated as proof that a WAN medium is active. The maintainer’s external-ONT topology reports `Ethernet / Up`; WANFiber optical fields correctly remain null even though the router advertises the WANFiber service.
 
 ## Dashboard and wallboard
 
@@ -130,6 +145,9 @@ The responsive local dashboard provides:
 - current connection health
 - automatic generic / FRITZ-enhanced presentation
 - latency with 24 h min / average / P95 / max
+- recent loss/jitter evidence
+- host link / route / neighbour diagnostics
+- FRITZ physical-WAN and activity context when available
 - FRITZ!Box CPU-temperature trend with current / min / average / max when available
 - outage counters and downtime statistics
 - observed-period availability
@@ -138,7 +156,7 @@ The responsive local dashboard provides:
 - CSV event export
 - human-readable ISP diagnostic report
 
-The v1.3 development branch adds the new host/physical-WAN evidence and a dedicated large-display view at:
+A dedicated large-display view is available at:
 
 ```text
 http://<host-lan-ip>:8080/wallboard
@@ -158,11 +176,11 @@ The automatic installer currently targets systems with `apt` and `systemd`, incl
 
 ## Compatibility status
 
-The v1.2.x stable baseline has been validated on a physical ARM64 Raspberry Pi running Debian 13. Generic mode includes a controlled Ethernet disconnect/recovery test. FRITZ!Box enhanced mode has been validated with a FRITZ!Box 5530 Fiber on FRITZ!OS 8.20 and PPPoE, including reboot detection/correlation, backwards-compatible SQLite migration and CPU-temperature telemetry. WSL2/Ubuntu on x86_64 is also used for generic/install regression testing.
+The v1.3 baseline has been physically validated on an ARM64 Raspberry Pi running Debian 13. The existing generic Ethernet fault tests remain part of the maintained baseline. FRITZ!Box enhanced v1.3 has been validated with a FRITZ!Box 5530 Fiber on FRITZ!OS 8.20 using an external ONT -> Ethernet WAN path and PPPoE, including reboot detection/correlation, backwards-compatible SQLite migration, CPU-temperature telemetry, TCP/IPv6 evidence, rolling loss/jitter, host link/neighbour evidence, WANCommon access/link state, Online Monitor activity/sync context and correct suppression of inactive WANFiber optical fields.
 
-The v1.3 evidence surface is tracked separately as a physical-validation candidate rather than being silently folded into those stable claims.
+WSL2/Ubuntu on x86_64 is also used for generic/install regression testing, but not to claim physical Ethernet carrier behavior.
 
-See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for the current matrix and [docs/TESTING.md](docs/TESTING.md) for the validation checklist.
+See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for the current matrix and [docs/TESTING.md](docs/TESTING.md) for the validation checklist and maintainer validation record.
 
 ## Quick install
 
@@ -200,7 +218,7 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-The most relevant stable options are:
+Relevant options include:
 
 ```text
 LINEWATCH_ROUTER_MODE=auto
@@ -210,11 +228,7 @@ LINEWATCH_GATEWAY_PROBE=auto
 FRITZ_USER=
 FRITZ_PASSWORD=
 FRITZ_HOST=
-```
 
-v1.3 development also exposes optional TCP/IPv6/quality-window controls:
-
-```text
 LINEWATCH_TCP_HOST=1.1.1.1
 LINEWATCH_TCP_PORT=443
 LINEWATCH_TCP_SECONDS=10
@@ -255,7 +269,7 @@ Runtime data stays on the machine running UplinkWitness:
 
 The repository ignores `.env`, runtime databases and logs. Do not commit real router credentials, event logs, public IP addresses or personal network data.
 
-v1.3 fiber diagnostics intentionally do not persist SFP serial numbers, GPON serial numbers or similar hardware identifiers.
+Fiber diagnostics intentionally do not persist SFP serial numbers, GPON serial numbers or similar hardware identifiers.
 
 ## Architecture
 
@@ -291,7 +305,7 @@ Run tests locally with:
 python -m unittest discover -s tests -v
 ```
 
-Development features are promoted to stable only after the relevant physical validation in [docs/TESTING.md](docs/TESTING.md).
+Features are promoted to the validated baseline only after the relevant physical validation in [docs/TESTING.md](docs/TESTING.md).
 
 ## Contributing
 
