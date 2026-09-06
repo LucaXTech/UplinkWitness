@@ -54,7 +54,9 @@ Router telemetry is evidence, not permission to over-classify incidents.
 
 `FritzAdapter` uses local TR-064 through `fritzconnection`.
 
-For v1.3 development it uses `WANCommonInterfaceConfig` as the primary source for physical access type/status and Online Monitor activity. Official FRITZ! documentation defines the relevant utilization series as bytes per second.
+For v1.3 development it uses `WANCommonInterfaceConfig` as the primary source for physical access type/status and WAN activity. Official FRITZ! documentation defines the downstream/upstream utilization series as bytes per second. UplinkWitness stores the newest utilization sample rather than the documented `CurrentMaxSpeed` value, which is the maximum over that rolling list. If the common-link utilization series is absent, the adapter falls back to the newest Online Monitor `ds_current_bps` / `us_current_bps` values. `mc_current_bps` is multicast telemetry and is not substituted for ordinary downstream activity.
+
+Online Monitor sync-group/name information remains best-effort context. Activity and sync data are supporting evidence and do not become a standalone outage classifier.
 
 `X_AVM-DE_WANFiber` is queried only when the active WAN access type indicates fiber. Optical levels are converted from dBm/1000 to dBm. SFP serial numbers, GPON serial numbers and similar hardware identifiers are intentionally not stored.
 
