@@ -11,7 +11,7 @@ import subprocess
 import time
 import urllib.request
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -30,6 +30,7 @@ EVENTS.mkdir(exist_ok=True)
 POLL = float(os.getenv("LINEWATCH_POLL_SECONDS", "2"))
 SAVE_EVERY = float(os.getenv("LINEWATCH_HEALTHY_PERSIST_SECONDS", "30"))
 FRITZ_EVERY = float(os.getenv("LINEWATCH_FRITZ_POLL_SECONDS", "10"))
+FRITZ_TEMP_EVERY = float(os.getenv("LINEWATCH_FRITZ_TEMP_SECONDS", "60"))
 PUBLIC_IP_EVERY = float(os.getenv("LINEWATCH_PUBLIC_IP_SECONDS", "300"))
 RING_SECONDS = float(os.getenv("LINEWATCH_RING_SECONDS", "120"))
 ROUTER_MODE = os.getenv("LINEWATCH_ROUTER_MODE", "auto").strip().lower() or "auto"
@@ -52,6 +53,18 @@ STOP = False
 
 ROUTER_MODES = {"auto", "generic", "fritz"}
 GATEWAY_PROBE_MODES = {"auto", "on", "off"}
+
+# Stronger evidence replaces weaker classifications for one continuous outage.
+INCIDENT_PRIORITY = {
+    "HTTP_CONNECTIVITY_FAILURE": 10,
+    "DNS_FAILURE": 20,
+    "INTERNET_UNREACHABLE": 30,
+    "WAN_SESSION_DOWN": 40,
+    "GATEWAY_UNREACHABLE": 50,
+    "NETWORK_LINK_DOWN": 60,
+}
+REBOOT_ASSOCIATION_SECONDS = max(180.0, RING_SECONDS)
+REBOOT_ASSOCIATION_TOLERANCE_SECONDS = max(15.0, FRITZ_EVERY * 2)
 
 
 def now():
@@ -117,7 +130,9 @@ def dns_check():
 def http_check():
     t = time.monotonic()
     try:
-        req = urllib.request.Request(HTTP_URL, headers={"User-Agent": "UplinkWitness/1.1"})
+        req = urllib.request.Request(
+            HTTP_URL, headers={"User-Agent": "UplinkWitness/1.2.1"}
+        )
         with urllib.request.urlopen(req, timeout=3) as response:
             response.read(32)
         return 1, round((time.monotonic() - t) * 1000, 2)
@@ -128,7 +143,7 @@ def http_check():
 def public_ip():
     try:
         req = urllib.request.Request(
-            PUBLIC_IP_URL, headers={"User-Agent": "UplinkWitness/1.1"}
+            PUBLIC_IP_URL, headers={"User-Agent": "UplinkWitness/1.2.1"}
         )
         with urllib.request.urlopen(req, timeout=3) as response:
             return response.read(128).decode().strip() or None
@@ -166,6 +181,67 @@ def resolve_gateway_probe(mode=None):
     return None
 
 
+def latest_cpu_temperature(values):
+    """Return the newest valid CPU temperature in Celsius, else None."""
+    if not values:
+        return None
+    try:
+        value = float(values[0])
+    except (TypeError, ValueError):
+        return None
+    if not (0 < value < 250):
+        return None
+    return round(value, 1)
+
+
+def ip_change(previous, current):
+    """Return (old, new) only for a real same-source non-empty IP change."""
+    if previous and current and previous != current:
+        return previous, current
+    return None
+
+
+def classification_priority(kind):
+    return INCIDENT_PRIORITY.get(kind, 0)
+
+
+def record_classification(details, ts, kind):
+    history = details.setdefault("classification_history", [])
+    if not history or history[-1].get("event_type") != kind:
+        history.append({"ts": ts, "event_type": kind})
+
+
+def update_event(conn, event_id, *, kind=None, details=None):
+    fields = []
+    values = []
+    if kind is not None:
+        fields.append("event_type=?")
+        values.append(kind)
+    if details is not None:
+        fields.append("details_json=?")
+        values.append(json.dumps(details, ensure_ascii=False))
+    if not fields:
+        return
+    values.append(event_id)
+    conn.execute(f"UPDATE events SET {','.join(fields)} WHERE id=?", values)
+    conn.commit()
+
+
+def apply_incident_classification(conn, event_id, current_kind, details, ts, new_kind):
+    """Record observed classification and escalate the existing outage row if needed."""
+    before = len(details.get("classification_history", []))
+    record_classification(details, ts, new_kind)
+    history_changed = len(details.get("classification_history", [])) != before
+    if classification_priority(new_kind) > classification_priority(current_kind):
+        current_kind = new_kind
+        details["final_classification"] = new_kind
+        update_event(conn, event_id, kind=new_kind, details=details)
+        return current_kind, True
+    if history_changed:
+        update_event(conn, event_id, details=details)
+    return current_kind, False
+
+
 @dataclass
 class Sample:
     ts: str
@@ -190,18 +266,28 @@ class Sample:
     wan_transport: Optional[str]
     pppoe_ac_name: Optional[str]
     fritz_error: Optional[str]
+    router_cpu_temp_c: Optional[float] = None
 
 
-def connect_db():
-    conn = sqlite3.connect(DB, timeout=30)
+def _ensure_sample_column(conn, name, definition):
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(samples)")}
+    if name not in columns:
+        conn.execute(f"ALTER TABLE samples ADD COLUMN {name} {definition}")
+
+
+def connect_db(path=None):
+    db_path = DB if path is None else path
+    conn = sqlite3.connect(db_path, timeout=30)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(
         """CREATE TABLE IF NOT EXISTS samples(
           id INTEGER PRIMARY KEY, ts TEXT, carrier INTEGER, gateway TEXT, gateway_ok INTEGER, gateway_ms REAL,
           internet_ok INTEGER, internet_ms REAL, dns_ok INTEGER, dns_ms REAL, http_ok INTEGER, http_ms REAL,
           public_ip TEXT, router_uptime_s INTEGER, router_model TEXT, fritzos TEXT, wan_status TEXT,
-          wan_uptime_s INTEGER, wan_ip TEXT, wan_last_error TEXT, wan_transport TEXT, pppoe_ac_name TEXT, fritz_error TEXT)"""
+          wan_uptime_s INTEGER, wan_ip TEXT, wan_last_error TEXT, wan_transport TEXT, pppoe_ac_name TEXT,
+          fritz_error TEXT, router_cpu_temp_c REAL)"""
     )
+    _ensure_sample_column(conn, "router_cpu_temp_c", "REAL")
     conn.execute(
         """CREATE TABLE IF NOT EXISTS events(
           id INTEGER PRIMARY KEY, start_ts TEXT, end_ts TEXT, duration_s REAL, event_type TEXT, details_json TEXT)"""
@@ -242,11 +328,110 @@ def close_event(conn, event_id, details, duration, end=None):
     conn.commit()
 
 
+def estimated_router_boot_time(detected_ts, current_router_uptime_s):
+    """Estimate the router boot timestamp from detection time and current uptime."""
+    try:
+        detected = datetime.fromisoformat(detected_ts)
+        uptime = float(current_router_uptime_s)
+    except (TypeError, ValueError):
+        return None
+    if uptime < 0:
+        return None
+    return detected - timedelta(seconds=uptime)
+
+
+def _incident_matches_boot(start_ts, end_ts, boot_time, tolerance_s):
+    try:
+        start = datetime.fromisoformat(start_ts)
+        end = datetime.fromisoformat(end_ts) if end_ts else None
+    except (TypeError, ValueError):
+        return False
+    lower = start - timedelta(seconds=tolerance_s)
+    upper = (end or boot_time) + timedelta(seconds=tolerance_s)
+    return lower <= boot_time <= upper
+
+
+def associate_reboot_with_incident(
+    conn, reboot_event_id, detected_ts, reboot_details, open_event_id=None, open_details=None
+):
+    """Attach a confirmed reboot to the outage containing the estimated boot time."""
+    boot_time = estimated_router_boot_time(
+        detected_ts, reboot_details.get("current_router_uptime_s")
+    )
+    if boot_time is None:
+        return None
+
+    association = {
+        "event_id": reboot_event_id,
+        "detected_ts": detected_ts,
+        "estimated_boot_ts": boot_time.isoformat(timespec="seconds"),
+        "previous_router_uptime_s": reboot_details.get("previous_router_uptime_s"),
+        "current_router_uptime_s": reboot_details.get("current_router_uptime_s"),
+    }
+
+    if open_event_id is not None and open_details is not None:
+        row = conn.execute(
+            "SELECT start_ts FROM events WHERE id=?", (open_event_id,)
+        ).fetchone()
+        if row and _incident_matches_boot(
+            row[0], None, boot_time, REBOOT_ASSOCIATION_TOLERANCE_SECONDS
+        ):
+            open_details["confirmed_router_reboot"] = association
+            update_event(conn, open_event_id, details=open_details)
+            return open_event_id
+
+    rows = conn.execute(
+        """SELECT id,start_ts,end_ts,details_json
+           FROM events
+           WHERE duration_s IS NOT NULL
+             AND event_type IN (?,?,?,?,?,?)
+           ORDER BY end_ts DESC LIMIT 20""",
+        tuple(INCIDENT_PRIORITY),
+    ).fetchall()
+
+    exact = []
+    tolerant = []
+    for row in rows:
+        try:
+            start = datetime.fromisoformat(row[1])
+            end = datetime.fromisoformat(row[2])
+        except (TypeError, ValueError):
+            continue
+        if start <= boot_time <= end:
+            exact.append((row, 0.0))
+            continue
+        if _incident_matches_boot(
+            row[1], row[2], boot_time, REBOOT_ASSOCIATION_TOLERANCE_SECONDS
+        ):
+            distance = min(abs((boot_time - start).total_seconds()), abs((boot_time - end).total_seconds()))
+            tolerant.append((row, distance))
+
+    candidates = exact or sorted(tolerant, key=lambda item: item[1])
+    if not candidates:
+        return None
+
+    row = candidates[0][0]
+    try:
+        details = json.loads(row[3] or "{}")
+    except Exception:
+        details = {}
+    details["confirmed_router_reboot"] = association
+    update_event(conn, row[0], details=details)
+    directory = EVENTS / f"event_{row[0]:05d}"
+    if directory.exists():
+        (directory / "details.json").write_text(
+            json.dumps(details, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+    return row[0]
+
+
 class Fritz:
     def __init__(self, host):
         self.host = host
         self.fc = None
         self.wan = None
+        self.last_temp = None
+        self.last_temp_poll = 0.0
 
     def _connect(self):
         if FritzConnection is None:
@@ -276,6 +461,19 @@ class Fritz:
             except Exception:
                 pass
 
+    def _cpu_temperature(self):
+        mono = time.monotonic()
+        if self.last_temp is not None and mono - self.last_temp_poll < FRITZ_TEMP_EVERY:
+            return self.last_temp
+        self.last_temp_poll = mono
+        try:
+            value = latest_cpu_temperature(self.fc.get_cpu_temperatures())
+            if value is not None:
+                self.last_temp = value
+        except Exception:
+            pass
+        return self.last_temp
+
     def snapshot(self):
         try:
             if not self.fc:
@@ -296,6 +494,7 @@ class Fritz:
                     wan_transport=wan.get("NewTransportType"),
                     pppoe_ac_name=wan.get("NewPPPoEACName"),
                 )
+            out["router_cpu_temp_c"] = self._cpu_temperature()
             try:
                 log = self.fc.call_action("DeviceInfo1", "GetDeviceLog").get(
                     "NewDeviceLog"
@@ -307,6 +506,8 @@ class Fritz:
         except Exception as exc:
             self.fc = None
             self.wan = None
+            self.last_temp = None
+            self.last_temp_poll = 0.0
             return {"fritz_error": f"{type(exc).__name__}: {exc}"}, None
 
 
@@ -328,8 +529,7 @@ def classify(sample, gateway_probe_active=True):
     if not sample.http_ok:
         return "HTTP_CONNECTIVITY_FAILURE"
 
-    # ICMP may be blocked even when DNS and HTTP are healthy. Do not declare an
-    # outage from a failed Internet ping alone.
+    # ICMP may be blocked even when DNS and HTTP are healthy.
     return "OK"
 
 
@@ -390,7 +590,8 @@ def main():
     last_fritz = last_save = last_ip = 0.0
     pub = None
     prev_router = prev_wan = None
-    prev_wan_ip = None
+    prev_router_wan_ip = None
+    prev_public_ip = None
     open_event = None
     open_kind = None
     open_started = None
@@ -469,6 +670,7 @@ def main():
             state.get("wan_transport"),
             state.get("pppoe_ac_name"),
             state.get("fritz_error"),
+            state.get("router_cpu_temp_c"),
         )
         history.append(sample)
         history = history[-ring_samples:]
@@ -483,6 +685,7 @@ def main():
                     "current_router_uptime_s": router_uptime,
                     "wan_status": sample.wan_status,
                     "wan_ip": sample.wan_ip,
+                    "router_cpu_temp_c": sample.router_cpu_temp_c,
                 }
                 event_id = add_event(
                     conn,
@@ -492,6 +695,17 @@ def main():
                     end=ts,
                     duration=0,
                 )
+                related_id = associate_reboot_with_incident(
+                    conn,
+                    event_id,
+                    ts,
+                    details,
+                    open_event_id=open_event,
+                    open_details=open_details if open_event is not None else None,
+                )
+                if related_id is not None:
+                    details["related_incident_id"] = related_id
+                    update_event(conn, event_id, details=details)
                 bundle(event_id, history, last_log, details)
             prev_router = router_uptime
 
@@ -515,22 +729,39 @@ def main():
                 bundle(event_id, history, last_log, details)
             prev_wan = wan_uptime
 
-        observed_wan_ip = sample.wan_ip or sample.public_ip
-        if prev_wan_ip and observed_wan_ip and observed_wan_ip != prev_wan_ip:
+        router_change = ip_change(prev_router_wan_ip, sample.wan_ip)
+        if router_change:
             add_event(
                 conn,
                 "WAN_IP_CHANGED",
                 {
-                    "previous": prev_wan_ip,
-                    "new": observed_wan_ip,
-                    "source": "router" if sample.wan_ip else "public_probe",
+                    "previous": router_change[0],
+                    "new": router_change[1],
+                    "source": "router",
                 },
                 start=ts,
                 end=ts,
                 duration=0,
             )
-        if observed_wan_ip:
-            prev_wan_ip = observed_wan_ip
+        if sample.wan_ip:
+            prev_router_wan_ip = sample.wan_ip
+
+        public_change = ip_change(prev_public_ip, sample.public_ip)
+        if public_change:
+            add_event(
+                conn,
+                "WAN_IP_CHANGED",
+                {
+                    "previous": public_change[0],
+                    "new": public_change[1],
+                    "source": "public_probe",
+                },
+                start=ts,
+                end=ts,
+                duration=0,
+            )
+        if sample.public_ip:
+            prev_public_ip = sample.public_ip
 
         kind = classify(sample, gateway_probe_active is True)
         unhealthy = kind != "OK"
@@ -538,12 +769,22 @@ def main():
             open_kind = kind
             open_started = cycle
             open_details = {"start_state": asdict(sample)}
+            record_classification(open_details, ts, kind)
+            open_details["final_classification"] = kind
             open_event = add_event(conn, kind, open_details, start=ts)
             bundle(open_event, history, last_log, open_details)
+        elif unhealthy and open_event is not None:
+            open_kind, escalated = apply_incident_classification(
+                conn, open_event, open_kind, open_details, ts, kind
+            )
+            if escalated:
+                bundle(open_event, history, last_log, open_details)
         elif not unhealthy and open_event is not None:
             duration = cycle - open_started
             open_details.update(
-                end_state=asdict(sample), duration_s=round(duration, 2)
+                end_state=asdict(sample),
+                duration_s=round(duration, 2),
+                final_classification=open_kind,
             )
             close_event(conn, open_event, open_details, duration, end=ts)
             bundle(open_event, history, last_log, open_details)

@@ -23,8 +23,7 @@ def disable_browser_cache(response):
     return response
 
 
-# Keep the v1.0 event names for backwards-compatible history while v1.1 uses
-# router-agnostic names for newly recorded generic Linux incidents.
+# Keep legacy event names for backwards-compatible history.
 OUTAGE_TYPES = {
     "ETHERNET_LINK_DOWN",
     "ROUTER_UNREACHABLE",
@@ -69,6 +68,16 @@ def db():
     conn = sqlite3.connect(DB_PATH, timeout=5)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def has_column(conn, table, column):
+    return column in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def row_value(row, key, default=None):
+    if row is None:
+        return default
+    return row[key] if key in row.keys() else default
 
 
 def fmt_duration(seconds):
@@ -157,11 +166,43 @@ def latency_stats(conn, hours=24):
     }
 
 
+def temperature_stats(conn, hours=24):
+    if not has_column(conn, "samples", "router_cpu_temp_c"):
+        return {"min": None, "avg": None, "max": None, "samples": 0}
+    since = (
+        datetime.now(timezone.utc) - timedelta(hours=hours)
+    ).astimezone().isoformat(timespec="seconds")
+    rows = conn.execute(
+        """
+        SELECT router_cpu_temp_c
+        FROM samples
+        WHERE ts >= ?
+          AND router_cpu_temp_c IS NOT NULL
+          AND router_cpu_temp_c > 0
+        ORDER BY ts ASC
+        """,
+        (since,),
+    ).fetchall()
+    vals = [
+        float(row["router_cpu_temp_c"])
+        for row in rows
+        if row["router_cpu_temp_c"] is not None
+    ]
+    if not vals:
+        return {"min": None, "avg": None, "max": None, "samples": 0}
+    return {
+        "min": round(min(vals), 1),
+        "avg": round(sum(vals) / len(vals), 1),
+        "max": round(max(vals), 1),
+        "samples": len(vals),
+    }
+
+
 def fritz_telemetry_present(sample):
     if sample is None:
         return False
     return any(
-        sample[key] not in (None, "")
+        row_value(sample, key) not in (None, "")
         for key in (
             "router_model",
             "fritzos",
@@ -170,6 +211,7 @@ def fritz_telemetry_present(sample):
             "wan_uptime_s",
             "wan_ip",
             "fritz_error",
+            "router_cpu_temp_c",
         )
     )
 
@@ -279,8 +321,6 @@ def api_status():
         "max_s": round(max(outage_durations), 1) if outage_durations else 0,
     }
 
-    # A failed ICMP probe alone does not make the connection unhealthy. Many
-    # routers or upstream networks intentionally drop ping while DNS/HTTP work.
     current_ok = (
         sample["carrier"] != 0
         and sample["dns_ok"] == 1
@@ -308,6 +348,7 @@ def api_status():
             )
 
     fritz_enhanced = fritz_telemetry_present(sample)
+    temp_stats = temperature_stats(conn, 24)
     payload = {
         "ready": True,
         "current_ok": current_ok,
@@ -321,6 +362,8 @@ def api_status():
         "router_uptime_s": sample["router_uptime_s"],
         "router_uptime": fmt_duration(sample["router_uptime_s"]),
         "router_boot_iso": router_boot_iso,
+        "router_cpu_temp_c": row_value(sample, "router_cpu_temp_c"),
+        "router_cpu_temp_24h": temp_stats,
         "wan_status": sample["wan_status"],
         "wan_uptime_s": sample["wan_uptime_s"],
         "wan_uptime": fmt_duration(sample["wan_uptime_s"]),
@@ -460,6 +503,7 @@ def export_isp():
     outages = [row for row in rows if row["event_type"] in OUTAGE_TYPES]
     downtime = sum(float(row["duration_s"] or 0) for row in outages)
     enhanced = fritz_telemetry_present(sample)
+    temp = row_value(sample, "router_cpu_temp_c")
 
     generated = datetime.now().astimezone().isoformat(timespec="seconds")
     if lang == "en":
@@ -483,6 +527,7 @@ def export_isp():
                     f"Current router uptime: {fmt_duration(sample['router_uptime_s'])}",
                     f"Current WAN uptime: {fmt_duration(sample['wan_uptime_s'])}",
                     f"Current WAN IP: {sample['wan_ip'] or '-'}",
+                    f"Router CPU temperature: {f'{temp:.1f} C' if temp is not None else '-'}",
                     f"Transport: {sample['wan_transport'] or '-'}",
                     f"PPPoE AC/PoP: {sample['pppoe_ac_name'] or '-'}",
                 ]
@@ -520,6 +565,7 @@ def export_isp():
                     f"Uptime router attuale: {fmt_duration(sample['router_uptime_s'])}",
                     f"Uptime WAN attuale: {fmt_duration(sample['wan_uptime_s'])}",
                     f"IP WAN attuale: {sample['wan_ip'] or '-'}",
+                    f"Temperatura CPU router: {f'{temp:.1f} C' if temp is not None else '-'}",
                     f"Trasporto: {sample['wan_transport'] or '-'}",
                     f"PPPoE AC/PoP: {sample['pppoe_ac_name'] or '-'}",
                 ]

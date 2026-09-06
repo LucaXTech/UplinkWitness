@@ -1,6 +1,9 @@
-import unittest
+import json
 import sqlite3
-from unittest.mock import patch
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import Mock, patch
 
 import monitor
 
@@ -30,9 +33,26 @@ class MonitorTests(unittest.TestCase):
             wan_transport=None,
             pppoe_ac_name=None,
             fritz_error=None,
+            router_cpu_temp_c=None,
         )
         values.update(overrides)
         return monitor.Sample(**values)
+
+    def event_db(self):
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            """
+            CREATE TABLE events(
+                id INTEGER PRIMARY KEY,
+                start_ts TEXT,
+                end_ts TEXT,
+                duration_s REAL,
+                event_type TEXT,
+                details_json TEXT
+            )
+            """
+        )
+        return conn
 
     def test_auto_router_mode_defaults_to_generic_without_credentials(self):
         self.assertEqual(
@@ -117,28 +137,10 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(monitor.default_route(), ("192.168.178.1", "enp3s0"))
 
     def test_close_event_uses_explicit_end_timestamp(self):
-        conn = sqlite3.connect(":memory:")
-        conn.execute("""
-            CREATE TABLE events(
-                id INTEGER PRIMARY KEY,
-                start_ts TEXT,
-                end_ts TEXT,
-                duration_s REAL,
-                event_type TEXT,
-                details_json TEXT
-            )
-        """)
-
+        conn = self.event_db()
         start = "2026-09-05T18:00:00+02:00"
         end = "2026-09-05T18:00:15+02:00"
-
-        event_id = monitor.add_event(
-            conn,
-            "NETWORK_LINK_DOWN",
-            {},
-            start=start,
-        )
-
+        event_id = monitor.add_event(conn, "NETWORK_LINK_DOWN", {}, start=start)
         monitor.close_event(
             conn,
             event_id,
@@ -146,16 +148,204 @@ class MonitorTests(unittest.TestCase):
             15.0,
             end=end,
         )
-
         row = conn.execute(
             "SELECT start_ts, end_ts, duration_s FROM events WHERE id=?",
             (event_id,),
         ).fetchone()
-
         self.assertEqual(row[0], start)
         self.assertEqual(row[1], end)
         self.assertEqual(row[2], 15.0)
         conn.close()
+
+    def test_router_and_public_ip_sources_are_independent(self):
+        router_prev = "100.64.0.10"
+        public_prev = "203.0.113.10"
+        self.assertIsNone(monitor.ip_change(router_prev, None))
+        self.assertIsNone(monitor.ip_change(public_prev, public_prev))
+        self.assertIsNone(monitor.ip_change(router_prev, router_prev))
+
+    def test_same_source_router_ip_change_is_detected(self):
+        self.assertEqual(
+            monitor.ip_change("100.64.0.10", "100.64.0.11"),
+            ("100.64.0.10", "100.64.0.11"),
+        )
+
+    def test_same_source_public_ip_change_is_detected(self):
+        self.assertEqual(
+            monitor.ip_change("203.0.113.10", "203.0.113.11"),
+            ("203.0.113.10", "203.0.113.11"),
+        )
+
+    def test_latest_cpu_temperature_uses_newest_valid_value(self):
+        self.assertEqual(monitor.latest_cpu_temperature([116, 115, 114]), 116.0)
+        self.assertEqual(monitor.latest_cpu_temperature(["116", 115]), 116.0)
+
+    def test_latest_cpu_temperature_rejects_empty_zero_and_invalid(self):
+        self.assertIsNone(monitor.latest_cpu_temperature([]))
+        self.assertIsNone(monitor.latest_cpu_temperature([0]))
+        self.assertIsNone(monitor.latest_cpu_temperature(["bad"]))
+        self.assertIsNone(monitor.latest_cpu_temperature([300]))
+
+    def test_temperature_api_failure_is_best_effort(self):
+        fritz = monitor.Fritz("192.0.2.1")
+        fritz.fc = Mock()
+        fritz.fc.get_cpu_temperatures.side_effect = RuntimeError("unsupported")
+        self.assertIsNone(fritz._cpu_temperature())
+
+    def test_estimated_router_boot_time_uses_current_uptime(self):
+        boot = monitor.estimated_router_boot_time(
+            "2026-09-06T03:15:41+02:00", 119
+        )
+        self.assertEqual(boot.isoformat(timespec="seconds"), "2026-09-06T03:13:42+02:00")
+
+    def test_reboot_association_uses_outage_containing_estimated_boot(self):
+        conn = self.event_db()
+        target_id = monitor.add_event(
+            conn,
+            "NETWORK_LINK_DOWN",
+            {},
+            start="2026-09-06T03:13:15+02:00",
+            end="2026-09-06T03:14:29+02:00",
+            duration=74.0,
+        )
+        monitor.add_event(
+            conn,
+            "DNS_FAILURE",
+            {},
+            start="2026-09-06T03:15:00+02:00",
+            end="2026-09-06T03:15:10+02:00",
+            duration=10.0,
+        )
+        reboot_id = monitor.add_event(
+            conn,
+            "FRITZBOX_REBOOT_DETECTED",
+            {},
+            start="2026-09-06T03:15:41+02:00",
+            end="2026-09-06T03:15:41+02:00",
+            duration=0,
+        )
+        related = monitor.associate_reboot_with_incident(
+            conn,
+            reboot_id,
+            "2026-09-06T03:15:41+02:00",
+            {
+                "previous_router_uptime_s": 43246,
+                "current_router_uptime_s": 119,
+            },
+        )
+        self.assertEqual(related, target_id)
+        details = json.loads(
+            conn.execute("SELECT details_json FROM events WHERE id=?", (target_id,)).fetchone()[0]
+        )
+        self.assertEqual(
+            details["confirmed_router_reboot"]["estimated_boot_ts"],
+            "2026-09-06T03:13:42+02:00",
+        )
+        conn.close()
+
+    def test_reboot_association_does_not_use_unrelated_recent_outage(self):
+        conn = self.event_db()
+        monitor.add_event(
+            conn,
+            "DNS_FAILURE",
+            {},
+            start="2026-09-06T03:15:00+02:00",
+            end="2026-09-06T03:15:10+02:00",
+            duration=10.0,
+        )
+        reboot_id = monitor.add_event(
+            conn,
+            "FRITZBOX_REBOOT_DETECTED",
+            {},
+            start="2026-09-06T03:15:41+02:00",
+            end="2026-09-06T03:15:41+02:00",
+            duration=0,
+        )
+        related = monitor.associate_reboot_with_incident(
+            conn,
+            reboot_id,
+            "2026-09-06T03:15:41+02:00",
+            {
+                "previous_router_uptime_s": 43246,
+                "current_router_uptime_s": 119,
+            },
+        )
+        self.assertIsNone(related)
+        conn.close()
+
+    def test_incident_escalation_reuses_one_event_row(self):
+        conn = self.event_db()
+        start = "2026-09-06T03:13:15+02:00"
+        details = {"classification_history": [{"ts": start, "event_type": "DNS_FAILURE"}]}
+        event_id = monitor.add_event(conn, "DNS_FAILURE", details, start=start)
+        kind, escalated = monitor.apply_incident_classification(
+            conn,
+            event_id,
+            "DNS_FAILURE",
+            details,
+            "2026-09-06T03:13:29+02:00",
+            "NETWORK_LINK_DOWN",
+        )
+        self.assertTrue(escalated)
+        self.assertEqual(kind, "NETWORK_LINK_DOWN")
+        rows = conn.execute(
+            "SELECT id,event_type,details_json FROM events"
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][1], "NETWORK_LINK_DOWN")
+        payload = json.loads(rows[0][2])
+        self.assertEqual(payload["classification_history"][-1]["event_type"], "NETWORK_LINK_DOWN")
+        conn.close()
+
+    def test_weaker_classification_does_not_downgrade_incident(self):
+        conn = self.event_db()
+        start = "2026-09-06T03:13:29+02:00"
+        details = {"classification_history": [{"ts": start, "event_type": "NETWORK_LINK_DOWN"}]}
+        event_id = monitor.add_event(conn, "NETWORK_LINK_DOWN", details, start=start)
+        kind, escalated = monitor.apply_incident_classification(
+            conn,
+            event_id,
+            "NETWORK_LINK_DOWN",
+            details,
+            "2026-09-06T03:13:59+02:00",
+            "INTERNET_UNREACHABLE",
+        )
+        self.assertFalse(escalated)
+        self.assertEqual(kind, "NETWORK_LINK_DOWN")
+        row = conn.execute("SELECT event_type FROM events WHERE id=?", (event_id,)).fetchone()
+        self.assertEqual(row[0], "NETWORK_LINK_DOWN")
+        conn.close()
+
+    def test_existing_database_migrates_temperature_column_in_place(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "legacy.sqlite3"
+            conn = sqlite3.connect(path)
+            conn.execute(
+                """
+                CREATE TABLE samples(
+                  id INTEGER PRIMARY KEY, ts TEXT, carrier INTEGER, gateway TEXT, gateway_ok INTEGER, gateway_ms REAL,
+                  internet_ok INTEGER, internet_ms REAL, dns_ok INTEGER, dns_ms REAL, http_ok INTEGER, http_ms REAL,
+                  public_ip TEXT, router_uptime_s INTEGER, router_model TEXT, fritzos TEXT, wan_status TEXT,
+                  wan_uptime_s INTEGER, wan_ip TEXT, wan_last_error TEXT, wan_transport TEXT, pppoe_ac_name TEXT,
+                  fritz_error TEXT
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO samples(id,ts,carrier,gateway,gateway_ok,internet_ok,dns_ok,http_ok) VALUES(1,?,?,?,?,?,?,?)",
+                ("2026-09-05T12:00:00+00:00", 1, "192.168.1.1", 1, 1, 1, 1),
+            )
+            conn.commit()
+            conn.close()
+
+            migrated = monitor.connect_db(path)
+            columns = {row[1] for row in migrated.execute("PRAGMA table_info(samples)")}
+            self.assertIn("router_cpu_temp_c", columns)
+            self.assertEqual(
+                migrated.execute("SELECT COUNT(*) FROM samples").fetchone()[0],
+                1,
+            )
+            migrated.close()
 
 
 if __name__ == "__main__":
