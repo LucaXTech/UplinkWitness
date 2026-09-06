@@ -91,6 +91,29 @@
     frame.src=server+'/wallboard?webos=1';
     timer=setTimeout(function(){loading.style.display='none';},7000);
   }
+  function activateApp(){
+    try{
+      if(window.PalmSystem && PalmSystem.activate){PalmSystem.activate();}
+      else if(window.webOSSystem && webOSSystem.activate){webOSSystem.activate();}
+    }catch(e){}
+  }
+  function handleLaunch(data){
+    var detail=data && data.detail ? data.detail : {};
+    if(detail.server){openServer(detail.server);}
+    activateApp();
+  }
+  function initialLaunchServer(){
+    try{
+      if(window.PalmSystem && PalmSystem.launchParams){
+        var params=JSON.parse(PalmSystem.launchParams);
+        if(params && params.server){return params.server;}
+      }
+    }catch(e){}
+    return '';
+  }
+
+  document.addEventListener('webOSLaunch',handleLaunch,true);
+  document.addEventListener('webOSRelaunch',handleLaunch,true);
   frame.addEventListener('load',function(){
     if(timer){clearTimeout(timer);timer=null;}
     loading.style.display='none';
@@ -107,8 +130,11 @@
     if(code===461 && setup.style.display==='flex' && frame.src){e.preventDefault();setup.style.display='none';try{frame.contentWindow.focus();}catch(x){}}
   });
 
+  var launchServer=initialLaunchServer();
   var saved=localStorage.getItem(KEY);
-  if(saved){openServer(saved);}else{showSetup(false);}
+  if(launchServer){openServer(launchServer);}
+  else if(saved){openServer(saved);}
+  else{showSetup(false);}
 })();
 </script>
 </body>
