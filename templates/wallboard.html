@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>UplinkWitness Wallboard</title>
+<meta name="theme-color" content="#0b1020">
+<style>
+:root{color-scheme:dark;--bg:#070b14;--card:#111827;--line:#243149;--muted:#93a4bd;--ok:#4bd37b;--bad:#ff6b6b;--accent:#6da8ff;--warn:#f4bf50}
+*{box-sizing:border-box}html,body{margin:0;min-height:100%;background:var(--bg);color:#f7f9fc;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}body{min-height:100vh}main{width:100%;min-height:100vh;padding:2.4vw;display:flex;flex-direction:column;gap:1.3vw}
+header{display:flex;justify-content:space-between;align-items:center;gap:2vw}.brand{font-size:clamp(24px,2.5vw,48px);font-weight:800;letter-spacing:-.02em}.muted{color:var(--muted)}.clock{text-align:right;font-size:clamp(16px,1.4vw,28px)}
+.hero{display:flex;align-items:center;justify-content:space-between;gap:2vw;border:1px solid var(--line);border-radius:1.4vw;background:var(--card);padding:1.7vw 2vw}.state{display:flex;align-items:center;gap:1.1vw;font-size:clamp(30px,4vw,76px);font-weight:850}.dot{width:clamp(18px,1.8vw,34px);height:clamp(18px,1.8vw,34px);border-radius:50%;background:var(--warn);box-shadow:0 0 26px rgba(244,191,80,.35)}.dot.ok{background:var(--ok);box-shadow:0 0 28px rgba(75,211,123,.38)}.dot.bad{background:var(--bad);box-shadow:0 0 28px rgba(255,107,107,.4)}.hero-meta{text-align:right;font-size:clamp(14px,1.15vw,24px);line-height:1.55}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1.1vw}.card{border:1px solid var(--line);border-radius:1.2vw;background:var(--card);padding:1.35vw;min-height:8.3vw}.label{color:var(--muted);font-size:clamp(13px,1vw,21px);text-transform:uppercase;letter-spacing:.045em}.value{font-size:clamp(22px,2.2vw,44px);font-weight:800;margin-top:.45vw;overflow-wrap:anywhere}.sub{color:var(--muted);font-size:clamp(12px,.9vw,19px);margin-top:.35vw;overflow-wrap:anywhere}
+.bottom{display:grid;grid-template-columns:1.8fr 1fr;gap:1.1vw;flex:1;min-height:0}.panel{border:1px solid var(--line);border-radius:1.2vw;background:var(--card);padding:1.2vw;min-height:0}.panel-title{font-size:clamp(16px,1.2vw,24px);font-weight:700;margin-bottom:.65vw}canvas{width:100%;height:100%;min-height:180px;background:#0b1220;border-radius:.8vw;border:1px solid var(--line)}.problem{font-size:clamp(20px,1.9vw,38px);font-weight:750;line-height:1.25;margin-top:1vw}.problem-time{font-size:clamp(14px,1.05vw,21px);color:var(--muted);margin-top:.7vw}.evidence{margin-top:1.3vw;padding-top:1vw;border-top:1px solid var(--line);font-size:clamp(13px,1vw,20px);line-height:1.7}
+@media(max-width:900px){main{padding:16px;gap:12px}.grid{grid-template-columns:repeat(2,1fr);gap:10px}.bottom{grid-template-columns:1fr}.hero{border-radius:14px;padding:16px}.card,.panel{border-radius:12px;padding:13px}.card{min-height:105px}.hero-meta{display:none}.bottom canvas{height:220px}.state{font-size:38px}}
+</style>
+</head>
+<body>
+<main>
+<header><div><div class="brand">UplinkWitness <span class="muted">Wallboard</span></div><div id="subtitle" class="muted">Internet connection black box</div></div><div class="clock"><div id="clock">-</div><div id="sample" class="muted">-</div></div></header>
+<section class="hero"><div class="state"><span id="dot" class="dot"></span><span id="state">Caricamento…</span></div><div class="hero-meta"><div id="mode">-</div><div id="router">-</div></div></section>
+<section class="grid">
+<div class="card"><div class="label">Ping Internet</div><div id="ping" class="value">-</div><div id="pingSub" class="sub">-</div></div>
+<div class="card"><div class="label">WAN / PPPoE</div><div id="wan" class="value">-</div><div id="wanSub" class="sub">-</div></div>
+<div class="card"><div class="label">WAN fisica</div><div id="physical" class="value">-</div><div id="traffic" class="sub">-</div></div>
+<div class="card"><div class="label">Uptime router</div><div id="uptime" class="value">-</div><div id="uptimeSub" class="sub">-</div></div>
+<div class="card"><div class="label">Temperatura router</div><div id="temp" class="value">-</div><div id="tempSub" class="sub">-</div></div>
+<div class="card"><div class="label">Disponibilità 30 giorni</div><div id="availability" class="value">-</div><div id="availabilitySub" class="sub">-</div></div>
+</section>
+<section class="bottom">
+<div class="panel"><div class="panel-title">Latenza Internet · ultime 24 ore</div><canvas id="chart" width="1200" height="330"></canvas></div>
+<div class="panel"><div class="panel-title">Ultimo problema</div><div id="problem" class="problem">Nessuno registrato</div><div id="problemTime" class="problem-time">-</div><div id="evidence" class="evidence muted"></div></div>
+</section>
+</main>
+<script>
+var lastHistory=[];
+function fmtDate(v){if(!v)return "-";try{return new Intl.DateTimeFormat("it-IT",{dateStyle:"short",timeStyle:"medium"}).format(new Date(v))}catch(e){return v}}
+function dur(s){if(s===null||s===undefined)return "-";s=Math.round(Number(s));var d=Math.floor(s/86400);s%=86400;var h=Math.floor(s/3600);s%=3600;var m=Math.floor(s/60),sec=s%60;if(d)return d+"g "+h+"h "+m+"m";if(h)return h+"h "+m+"m";if(m)return m+"m "+sec+"s";return sec+"s"}
+function pct(v){var n=Number(v);if(!isFinite(n))return "-";return n.toFixed(n===100?0:3)+"%"}
+function eventLabel(v){var m={NETWORK_LINK_DOWN:"Link locale caduto",GATEWAY_UNREACHABLE:"Gateway non raggiungibile",WAN_SESSION_DOWN:"Sessione WAN disconnessa",INTERNET_UNREACHABLE:"Internet non raggiungibile",DNS_FAILURE:"Problema DNS",HTTP_CONNECTIVITY_FAILURE:"Problema HTTP"};return m[v]||v||"Nessuno registrato"}
+function updateClock(){document.getElementById("clock").textContent=new Intl.DateTimeFormat("it-IT",{dateStyle:"medium",timeStyle:"medium"}).format(new Date())}
+function render(s){if(!s||!s.ready)return;var dot=document.getElementById("dot");dot.className="dot "+(s.current_ok?"ok":"bad");document.getElementById("state").textContent=s.current_ok?"CONNESSIONE OK":"PROBLEMA RILEVATO";document.getElementById("sample").textContent="Campione "+fmtDate(s.ts);document.getElementById("mode").textContent=s.fritz_enhanced?"FRITZ!Box enhanced":"Linux generico";document.getElementById("router").textContent=s.router_model||"";
+ document.getElementById("ping").textContent=s.internet_ms!=null?s.internet_ms+" ms":"ICMP n/d";document.getElementById("pingSub").textContent="loss 24h "+(s.quality_24h&&s.quality_24h.loss_pct!=null?s.quality_24h.loss_pct+"%":"-")+" · jitter "+(s.quality_24h&&s.quality_24h.jitter_ms!=null?s.quality_24h.jitter_ms+" ms":"-");
+ document.getElementById("wan").textContent=s.wan_status|| (s.current_ok?"Operativa":"-");document.getElementById("wanSub").textContent=s.wan_uptime?"uptime "+s.wan_uptime:"TCP "+(s.tcp_ms!=null?s.tcp_ms+" ms":"-");
+ document.getElementById("physical").textContent=(s.wan_access_type||"-")+" · "+(s.wan_physical_status||"-");document.getElementById("traffic").textContent="↓ "+(s.wan_down_rate||"-")+" · ↑ "+(s.wan_up_rate||"-")+(s.wan_sync_mode?" · "+s.wan_sync_mode:"");
+ document.getElementById("uptime").textContent=s.router_uptime||"-";document.getElementById("uptimeSub").textContent=s.interface_speed_mbps!=null?"host "+s.interface_speed_mbps+" Mbps · "+(s.interface_duplex||"-"):"neighbor "+(s.gateway_neighbor_state||"-");
+ document.getElementById("temp").textContent=s.router_cpu_temp_c!=null?s.router_cpu_temp_c+" °C":"-";var ts=s.router_cpu_temp_24h||{};document.getElementById("tempSub").textContent=ts.samples?"min "+ts.min+" · media "+ts.avg+" · max "+ts.max:"telemetria non disponibile";
+ var w=s.windows&&s.windows["30"]?s.windows["30"]:{};document.getElementById("availability").textContent=pct(w.availability_pct);document.getElementById("availabilitySub").textContent=(w.outages||0)+" outage · "+dur(w.downtime_s||0)+" downtime";
+ var p=s.last_problem;document.getElementById("problem").textContent=p?eventLabel(p.event_type):"Nessuno registrato";document.getElementById("problemTime").textContent=p?fmtDate(p.start_ts):"-";var ev=[];if(s.ipv6_ok!==null&&s.ipv6_ok!==undefined)ev.push("IPv6 "+(s.ipv6_ok?"OK":"FAIL")+(s.ipv6_ms!=null?" "+s.ipv6_ms+" ms":""));if(s.gateway_neighbor_state)ev.push("neighbor "+s.gateway_neighbor_state);if(s.fiber_rx_dbm!=null)ev.push("fiber RX "+s.fiber_rx_dbm+" dBm");document.getElementById("evidence").textContent=ev.join(" · ");}
+function draw(rows){var c=document.getElementById("chart"),ctx=c.getContext("2d"),w=c.width,h=c.height;ctx.clearRect(0,0,w,h);ctx.font="15px system-ui";if(!rows||rows.length<2)return;var vals=[];for(var i=0;i<rows.length;i++){var n=Number(rows[i].internet_ms);if(isFinite(n)&&n>=0)vals.push(n)}var max=Math.max.apply(null,[50].concat(vals));max=Math.ceil(Math.min(max,500)/25)*25;ctx.strokeStyle="#243149";ctx.fillStyle="#93a4bd";ctx.lineWidth=1;for(i=0;i<=4;i++){var y=12+(h-42)*(i/4),v=Math.round(max*(1-i/4));ctx.beginPath();ctx.moveTo(58,y);ctx.lineTo(w-10,y);ctx.stroke();ctx.fillText(v+" ms",6,y+5)}ctx.strokeStyle="#6da8ff";ctx.lineWidth=3;var drawing=false;for(i=0;i<rows.length;i++){var r=rows[i],value=Number(r.internet_ms);if(!isFinite(value)){if(drawing){ctx.stroke();drawing=false}continue}var x=58+i/(rows.length-1)*(w-70);y=12+(h-42)*(1-Math.min(value,max)/max);if(!drawing){ctx.beginPath();ctx.moveTo(x,y);drawing=true}else ctx.lineTo(x,y)}if(drawing)ctx.stroke()}
+function refresh(){fetch("/api/status",{cache:"no-store"}).then(function(r){return r.json()}).then(render).catch(function(e){document.getElementById("state").textContent=String(e)})}
+function refreshHistory(){fetch("/api/history?hours=24",{cache:"no-store"}).then(function(r){return r.json()}).then(function(rows){lastHistory=rows;draw(rows)}).catch(function(){})}
+updateClock();refresh();refreshHistory();setInterval(updateClock,1000);setInterval(refresh,5000);setInterval(refreshHistory,30000);window.addEventListener("resize",function(){draw(lastHistory)});
+</script>
+</body>
+</html>
