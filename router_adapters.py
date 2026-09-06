@@ -49,14 +49,10 @@ def numeric_series(value):
     return result
 
 
-def _positive_number(value):
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    if number < 0:
-        return None
-    return round(number, 2)
+def latest_numeric_series_value(value):
+    """Return the latest value from a FRITZ! rolling numeric series."""
+    values = numeric_series(value)
+    return round(values[-1], 2) if values else None
 
 
 def _optical_dbm(value):
@@ -123,8 +119,12 @@ class FritzAdapter:
             for service in services
             if "WANPPPConnection" in service or "WANIPConnection" in service
         ]
-        self.wan_common_services = [service for service in services if "WANCommon" in service]
-        self.wan_fiber_services = [service for service in services if "WANFiber" in service]
+        self.wan_common_services = [
+            service for service in services if "WANCommon" in service
+        ]
+        self.wan_fiber_services = [
+            service for service in services if "WANFiber" in service
+        ]
 
         self.wan = None
         for service in wan_candidates:
@@ -175,15 +175,19 @@ class FritzAdapter:
         if not self.wan_common_services:
             return out
 
-        common = self._call_first(self.wan_common_services, "GetCommonLinkProperties")
+        common = self._call_first(
+            self.wan_common_services, "GetCommonLinkProperties"
+        )
         if common:
             out["wan_access_type"] = common.get("NewWANAccessType")
             out["wan_physical_status"] = common.get("NewPhysicalLinkStatus")
-            out["wan_down_bytes_s"] = _positive_number(
-                common.get("NewX_AVM-DE_DownstreamCurrentMaxSpeed")
+            # FRITZ! documents the utilization lists as bytes/s. Use the latest
+            # sample, not CurrentMaxSpeed, which is the maximum of that list.
+            out["wan_down_bytes_s"] = latest_numeric_series_value(
+                common.get("NewX_AVM-DE_DownstreamCurrentUtilization")
             )
-            out["wan_up_bytes_s"] = _positive_number(
-                common.get("NewX_AVM-DE_UpstreamCurrentMaxSpeed")
+            out["wan_up_bytes_s"] = latest_numeric_series_value(
+                common.get("NewX_AVM-DE_UpstreamCurrentUtilization")
             )
 
         online = self._call_first(
@@ -194,16 +198,18 @@ class FritzAdapter:
         if online:
             out["wan_sync_group"] = online.get("NewSyncGroupName")
             out["wan_sync_mode"] = online.get("NewSyncGroupMode")
-            # Official FRITZ! documentation defines these series as bytes/s.
-            # Keep only an aggregate recent value in SQLite instead of persisting arrays.
+            # Online Monitor exposes rolling downstream/upstream bytes/s arrays.
+            # Use the newest sample only as a fallback when the common-link
+            # utilization list is unavailable. mc_current_bps is multicast and
+            # must not be substituted for downstream traffic.
             if out["wan_down_bytes_s"] is None:
-                down = numeric_series(online.get("Newmc_current_bps"))
-                if down:
-                    out["wan_down_bytes_s"] = round(max(down), 2)
+                out["wan_down_bytes_s"] = latest_numeric_series_value(
+                    online.get("Newds_current_bps")
+                )
             if out["wan_up_bytes_s"] is None:
-                up = numeric_series(online.get("Newus_current_bps"))
-                if up:
-                    out["wan_up_bytes_s"] = round(max(up), 2)
+                out["wan_up_bytes_s"] = latest_numeric_series_value(
+                    online.get("Newus_current_bps")
+                )
         return out
 
     def _fiber_snapshot(self, access_type):
@@ -230,8 +236,12 @@ class FritzAdapter:
                 fiber_tx_dbm=_optical_dbm(info.get("NewTransmitOpticalLevel")),
                 fiber_rx_low_dbm=_optical_dbm(info.get("NewLowerOpticalThreshold")),
                 fiber_rx_high_dbm=_optical_dbm(info.get("NewUpperOpticalThreshold")),
-                fiber_tx_low_dbm=_optical_dbm(info.get("NewLowerTransmitPowerThreshold")),
-                fiber_tx_high_dbm=_optical_dbm(info.get("NewUpperTransmitPowerThreshold")),
+                fiber_tx_low_dbm=_optical_dbm(
+                    info.get("NewLowerTransmitPowerThreshold")
+                ),
+                fiber_tx_high_dbm=_optical_dbm(
+                    info.get("NewUpperTransmitPowerThreshold")
+                ),
                 fiber_mode=info.get("NewFiberMode"),
             )
 
@@ -271,7 +281,9 @@ class FritzAdapter:
             out["router_cpu_temp_c"] = self._cpu_temperature()
 
             try:
-                log = self.fc.call_action("DeviceInfo1", "GetDeviceLog").get("NewDeviceLog")
+                log = self.fc.call_action("DeviceInfo1", "GetDeviceLog").get(
+                    "NewDeviceLog"
+                )
             except Exception:
                 log = None
             out["fritz_error"] = None
