@@ -23,7 +23,6 @@ def disable_browser_cache(response):
     return response
 
 
-# Keep legacy event names for backwards-compatible history.
 OUTAGE_TYPES = {
     "ETHERNET_LINK_DOWN",
     "ROUTER_UNREACHABLE",
@@ -77,6 +76,8 @@ OPTIONAL_HISTORY_COLUMNS = (
     "tcp_ms",
     "ipv6_ok",
     "ipv6_ms",
+    "icmp_loss_pct",
+    "icmp_jitter_ms",
     "interface_speed_mbps",
     "interface_duplex",
     "gateway_neighbor_state",
@@ -142,9 +143,7 @@ def format_rate(value):
 
 
 def since_iso(days):
-    return (
-        datetime.now(timezone.utc) - timedelta(days=days)
-    ).astimezone().isoformat(timespec="seconds")
+    return (datetime.now(timezone.utc) - timedelta(days=days)).astimezone().isoformat(timespec="seconds")
 
 
 def event_row(row):
@@ -177,23 +176,13 @@ def percentile(sorted_values, p):
     ceil_index = min(floor_index + 1, len(sorted_values) - 1)
     if floor_index == ceil_index:
         return sorted_values[floor_index]
-    return (
-        sorted_values[floor_index] * (ceil_index - k)
-        + sorted_values[ceil_index] * (k - floor_index)
-    )
+    return sorted_values[floor_index] * (ceil_index - k) + sorted_values[ceil_index] * (k - floor_index)
 
 
 def latency_stats(conn, hours=24):
-    since = (
-        datetime.now(timezone.utc) - timedelta(hours=hours)
-    ).astimezone().isoformat(timespec="seconds")
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).astimezone().isoformat(timespec="seconds")
     rows = conn.execute(
-        """
-        SELECT internet_ms
-        FROM samples
-        WHERE ts >= ? AND internet_ok=1 AND internet_ms IS NOT NULL
-        ORDER BY ts ASC
-        """,
+        "SELECT internet_ms FROM samples WHERE ts >= ? AND internet_ok=1 AND internet_ms IS NOT NULL ORDER BY ts ASC",
         (since,),
     ).fetchall()
     vals = sorted(float(row["internet_ms"]) for row in rows if row["internet_ms"] is not None)
@@ -209,22 +198,15 @@ def latency_stats(conn, hours=24):
 
 
 def link_quality_stats(conn, hours=24):
-    """Return ICMP loss and mean absolute successive latency delta as jitter evidence."""
-    since = (
-        datetime.now(timezone.utc) - timedelta(hours=hours)
-    ).astimezone().isoformat(timespec="seconds")
+    """Saved-sample quality helper retained for analysis/tests; UI uses live probe-window fields."""
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).astimezone().isoformat(timespec="seconds")
     rows = conn.execute(
-        "SELECT internet_ok,internet_ms FROM samples WHERE ts >= ? ORDER BY ts ASC",
-        (since,),
+        "SELECT internet_ok,internet_ms FROM samples WHERE ts >= ? ORDER BY ts ASC", (since,)
     ).fetchall()
     if not rows:
         return {"loss_pct": None, "jitter_ms": None, "samples": 0}
     total = len(rows)
-    successes = [
-        float(row["internet_ms"])
-        for row in rows
-        if row["internet_ok"] == 1 and row["internet_ms"] is not None
-    ]
+    successes = [float(row["internet_ms"]) for row in rows if row["internet_ok"] == 1 and row["internet_ms"] is not None]
     loss = 100.0 * (total - sum(1 for row in rows if row["internet_ok"] == 1)) / total
     deltas = [abs(b - a) for a, b in zip(successes, successes[1:])]
     return {
@@ -237,25 +219,14 @@ def link_quality_stats(conn, hours=24):
 def temperature_stats(conn, hours=24):
     if not has_column(conn, "samples", "router_cpu_temp_c"):
         return {"min": None, "avg": None, "max": None, "samples": 0}
-    since = (
-        datetime.now(timezone.utc) - timedelta(hours=hours)
-    ).astimezone().isoformat(timespec="seconds")
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).astimezone().isoformat(timespec="seconds")
     rows = conn.execute(
-        """
-        SELECT router_cpu_temp_c
-        FROM samples
-        WHERE ts >= ?
-          AND router_cpu_temp_c IS NOT NULL
-          AND router_cpu_temp_c > 0
-        ORDER BY ts ASC
-        """,
+        """SELECT router_cpu_temp_c FROM samples
+           WHERE ts >= ? AND router_cpu_temp_c IS NOT NULL AND router_cpu_temp_c > 0
+           ORDER BY ts ASC""",
         (since,),
     ).fetchall()
-    vals = [
-        float(row["router_cpu_temp_c"])
-        for row in rows
-        if row["router_cpu_temp_c"] is not None
-    ]
+    vals = [float(row["router_cpu_temp_c"]) for row in rows if row["router_cpu_temp_c"] is not None]
     if not vals:
         return {"min": None, "avg": None, "max": None, "samples": 0}
     return {
@@ -267,19 +238,11 @@ def temperature_stats(conn, hours=24):
 
 
 def history_rows(conn, since):
-    optional = []
-    for column in OPTIONAL_HISTORY_COLUMNS:
-        optional.append(
-            column if has_column(conn, "samples", column) else f"NULL AS {column}"
-        )
+    optional = [column if has_column(conn, "samples", column) else f"NULL AS {column}" for column in OPTIONAL_HISTORY_COLUMNS]
     return conn.execute(
-        f"""
-        SELECT ts, gateway_ms, internet_ms, gateway_ok, internet_ok,
-               dns_ok, http_ok, wan_status, {','.join(optional)}
-        FROM samples
-        WHERE ts >= ?
-        ORDER BY ts ASC
-        """,
+        f"""SELECT ts, gateway_ms, internet_ms, gateway_ok, internet_ok,
+                   dns_ok, http_ok, wan_status, {','.join(optional)}
+            FROM samples WHERE ts >= ? ORDER BY ts ASC""",
         (since,),
     ).fetchall()
 
@@ -290,16 +253,8 @@ def fritz_telemetry_present(sample):
     return any(
         row_value(sample, key) not in (None, "")
         for key in (
-            "router_model",
-            "fritzos",
-            "router_uptime_s",
-            "wan_status",
-            "wan_uptime_s",
-            "wan_ip",
-            "fritz_error",
-            "router_cpu_temp_c",
-            "wan_access_type",
-            "wan_physical_status",
+            "router_model", "fritzos", "router_uptime_s", "wan_status", "wan_uptime_s",
+            "wan_ip", "fritz_error", "router_cpu_temp_c", "wan_access_type", "wan_physical_status",
         )
     )
 
@@ -318,13 +273,10 @@ def wallboard():
 def api_status():
     if not DB_PATH.exists():
         return jsonify({"ready": False, "reason": "Database not created yet."})
-
     conn = db()
     sample = conn.execute("SELECT * FROM samples ORDER BY id DESC LIMIT 1").fetchone()
     if sample is None:
-        conn.close()
-        return jsonify({"ready": False, "reason": "No samples available yet."})
-
+        conn.close(); return jsonify({"ready": False, "reason": "No samples available yet."})
     first_sample = conn.execute("SELECT ts FROM samples ORDER BY id ASC LIMIT 1").fetchone()
     first_sample_dt = parse_iso(first_sample["ts"]) if first_sample else None
     now_dt = datetime.now(timezone.utc).astimezone()
@@ -335,49 +287,25 @@ def api_status():
         observed_start = max(requested_start, first_sample_dt or requested_start)
         observed_s = max(1.0, (now_dt - observed_start).total_seconds())
         rows = conn.execute(
-            """
-            SELECT event_type, start_ts, end_ts, duration_s
-            FROM events
-            WHERE start_ts <= ?
-              AND (end_ts IS NULL OR end_ts >= ?)
-            """,
-            (
-                now_dt.isoformat(timespec="seconds"),
-                observed_start.isoformat(timespec="seconds"),
-            ),
+            """SELECT event_type, start_ts, end_ts, duration_s FROM events
+               WHERE start_ts <= ? AND (end_ts IS NULL OR end_ts >= ?)""",
+            (now_dt.isoformat(timespec="seconds"), observed_start.isoformat(timespec="seconds")),
         ).fetchall()
-
         downtime_s = 0.0
         for row in rows:
             if row["event_type"] not in OUTAGE_TYPES:
                 continue
-            start = parse_iso(row["start_ts"])
-            end = parse_iso(row["end_ts"]) if row["end_ts"] else now_dt
+            start = parse_iso(row["start_ts"]); end = parse_iso(row["end_ts"]) if row["end_ts"] else now_dt
             if not start or not end:
                 continue
-            overlap_start = max(start, observed_start)
-            overlap_end = min(end, now_dt)
+            overlap_start = max(start, observed_start); overlap_end = min(end, now_dt)
             if overlap_end > overlap_start:
                 downtime_s += (overlap_end - overlap_start).total_seconds()
-
         downtime_s = round(downtime_s, 1)
-        availability = max(
-            0.0,
-            100.0 * (1.0 - min(downtime_s, observed_s) / observed_s),
-        )
+        availability = max(0.0, 100.0 * (1.0 - min(downtime_s, observed_s) / observed_s))
         windows[str(days)] = {
-            "reboots": sum(
-                1
-                for row in rows
-                if row["event_type"] == "FRITZBOX_REBOOT_DETECTED"
-                and (parse_iso(row["start_ts"]) or observed_start) >= observed_start
-            ),
-            "wan_resets": sum(
-                1
-                for row in rows
-                if row["event_type"] == "WAN_SESSION_RESET_DETECTED"
-                and (parse_iso(row["start_ts"]) or observed_start) >= observed_start
-            ),
+            "reboots": sum(1 for row in rows if row["event_type"] == "FRITZBOX_REBOOT_DETECTED" and (parse_iso(row["start_ts"]) or observed_start) >= observed_start),
+            "wan_resets": sum(1 for row in rows if row["event_type"] == "WAN_SESSION_RESET_DETECTED" and (parse_iso(row["start_ts"]) or observed_start) >= observed_start),
             "outages": sum(1 for row in rows if row["event_type"] in OUTAGE_TYPES),
             "downtime_s": downtime_s,
             "availability_pct": round(availability, 5),
@@ -385,54 +313,30 @@ def api_status():
             "observed_since": observed_start.isoformat(timespec="seconds"),
         }
 
-    last_reboot = conn.execute(
-        "SELECT * FROM events WHERE event_type='FRITZBOX_REBOOT_DETECTED' ORDER BY start_ts DESC LIMIT 1"
-    ).fetchone()
+    last_reboot = conn.execute("SELECT * FROM events WHERE event_type='FRITZBOX_REBOOT_DETECTED' ORDER BY start_ts DESC LIMIT 1").fetchone()
     outage_placeholders = ",".join("?" for _ in OUTAGE_TYPES)
     last_problem = conn.execute(
-        f"SELECT * FROM events WHERE event_type IN ({outage_placeholders}) ORDER BY start_ts DESC LIMIT 1",
-        tuple(OUTAGE_TYPES),
+        f"SELECT * FROM events WHERE event_type IN ({outage_placeholders}) ORDER BY start_ts DESC LIMIT 1", tuple(OUTAGE_TYPES)
     ).fetchone()
     outage_rows = conn.execute(
-        f"SELECT duration_s FROM events WHERE event_type IN ({outage_placeholders}) AND duration_s IS NOT NULL",
-        tuple(OUTAGE_TYPES),
+        f"SELECT duration_s FROM events WHERE event_type IN ({outage_placeholders}) AND duration_s IS NOT NULL", tuple(OUTAGE_TYPES)
     ).fetchall()
-    outage_durations = [
-        float(row["duration_s"]) for row in outage_rows if row["duration_s"] is not None
-    ]
+    outage_durations = [float(row["duration_s"]) for row in outage_rows if row["duration_s"] is not None]
     outage_stats = {
         "count": len(outage_durations),
-        "avg_s": round(sum(outage_durations) / len(outage_durations), 1)
-        if outage_durations
-        else 0,
+        "avg_s": round(sum(outage_durations) / len(outage_durations), 1) if outage_durations else 0,
         "max_s": round(max(outage_durations), 1) if outage_durations else 0,
     }
+    current_ok = sample["carrier"] != 0 and sample["dns_ok"] == 1 and sample["http_ok"] == 1 and sample["wan_status"] in (None, "", "Connected")
 
-    current_ok = (
-        sample["carrier"] != 0
-        and sample["dns_ok"] == 1
-        and sample["http_ok"] == 1
-        and (sample["wan_status"] in (None, "", "Connected"))
-    )
-
-    sample_dt = parse_iso(sample["ts"])
-    router_boot_iso = None
-    wan_start_iso = None
-    reconnect_delay_s = None
+    sample_dt = parse_iso(sample["ts"]); router_boot_iso = wan_start_iso = reconnect_delay_s = None
     if sample_dt is not None:
         if sample["router_uptime_s"] is not None:
-            router_boot_iso = (
-                sample_dt - timedelta(seconds=int(sample["router_uptime_s"]))
-            ).isoformat(timespec="seconds")
+            router_boot_iso = (sample_dt - timedelta(seconds=int(sample["router_uptime_s"]))).isoformat(timespec="seconds")
         if sample["wan_uptime_s"] is not None:
-            wan_start_iso = (
-                sample_dt - timedelta(seconds=int(sample["wan_uptime_s"]))
-            ).isoformat(timespec="seconds")
+            wan_start_iso = (sample_dt - timedelta(seconds=int(sample["wan_uptime_s"]))).isoformat(timespec="seconds")
         if sample["router_uptime_s"] is not None and sample["wan_uptime_s"] is not None:
-            reconnect_delay_s = max(
-                0,
-                int(sample["router_uptime_s"]) - int(sample["wan_uptime_s"]),
-            )
+            reconnect_delay_s = max(0, int(sample["router_uptime_s"]) - int(sample["wan_uptime_s"]))
 
     fritz_enhanced = fritz_telemetry_present(sample)
     payload = {
@@ -475,6 +379,10 @@ def api_status():
         "tcp_ms": row_value(sample, "tcp_ms"),
         "ipv6_ok": row_value(sample, "ipv6_ok"),
         "ipv6_ms": row_value(sample, "ipv6_ms"),
+        "quality_recent": {
+            "loss_pct": row_value(sample, "icmp_loss_pct"),
+            "jitter_ms": row_value(sample, "icmp_jitter_ms"),
+        },
         "interface_speed_mbps": row_value(sample, "interface_speed_mbps"),
         "interface_duplex": row_value(sample, "interface_duplex"),
         "gateway_neighbor_state": row_value(sample, "gateway_neighbor_state"),
@@ -500,36 +408,25 @@ def api_status():
         "last_problem": event_row(last_problem) if last_problem else None,
         "windows": windows,
         "latency_24h": latency_stats(conn, 24),
-        "quality_24h": link_quality_stats(conn, 24),
         "outage_stats": outage_stats,
     }
-    conn.close()
-    return jsonify(payload)
+    conn.close(); return jsonify(payload)
 
 
 @app.route("/api/events")
 def api_events():
     limit = min(max(int(request.args.get("limit", "50")), 1), 200)
-    conn = db()
-    rows = conn.execute(
-        "SELECT * FROM events ORDER BY start_ts DESC LIMIT ?", (limit,)
-    ).fetchall()
-    conn.close()
+    conn = db(); rows = conn.execute("SELECT * FROM events ORDER BY start_ts DESC LIMIT ?", (limit,)).fetchall(); conn.close()
     return jsonify([event_row(row) for row in rows])
 
 
 @app.route("/api/history")
 def api_history():
     hours = min(max(int(request.args.get("hours", "24")), 1), 168)
-    since = (
-        datetime.now(timezone.utc) - timedelta(hours=hours)
-    ).astimezone().isoformat(timespec="seconds")
-    conn = db()
-    rows = history_rows(conn, since)
-    conn.close()
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).astimezone().isoformat(timespec="seconds")
+    conn = db(); rows = history_rows(conn, since); conn.close()
     if len(rows) > 1200:
-        step = max(1, len(rows) // 1200)
-        rows = rows[::step]
+        rows = rows[::max(1, len(rows) // 1200)]
     return jsonify([dict(row) for row in rows])
 
 
@@ -538,195 +435,62 @@ def export_events():
     days = min(max(int(request.args.get("days", "30")), 1), 3650)
     conn = db()
     rows = conn.execute(
-        """
-        SELECT id,start_ts,end_ts,duration_s,event_type,details_json
-        FROM events WHERE start_ts >= ? ORDER BY start_ts ASC
-        """,
+        "SELECT id,start_ts,end_ts,duration_s,event_type,details_json FROM events WHERE start_ts >= ? ORDER BY start_ts ASC",
         (since_iso(days),),
-    ).fetchall()
-    conn.close()
-
-    buf = io.StringIO()
-    writer = csv.writer(buf, delimiter=";")
-    writer.writerow(
-        [
-            "ID",
-            "Start",
-            "End",
-            "Duration_s",
-            "Technical_type",
-            "Description_IT",
-            "Description_EN",
-            "Details",
-        ]
-    )
+    ).fetchall(); conn.close()
+    buf = io.StringIO(); writer = csv.writer(buf, delimiter=";")
+    writer.writerow(["ID", "Start", "End", "Duration_s", "Technical_type", "Description_IT", "Description_EN", "Details"])
     for row in rows:
-        writer.writerow(
-            [
-                row["id"],
-                row["start_ts"],
-                row["end_ts"],
-                row["duration_s"],
-                row["event_type"],
-                LABELS_IT.get(row["event_type"], row["event_type"]),
-                LABELS_EN.get(row["event_type"], row["event_type"]),
-                row["details_json"],
-            ]
-        )
-    return Response(
-        "\ufeff" + buf.getvalue(),
-        mimetype="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="linewatch_events_{days}days.csv"'},
-    )
+        writer.writerow([row["id"], row["start_ts"], row["end_ts"], row["duration_s"], row["event_type"], LABELS_IT.get(row["event_type"], row["event_type"]), LABELS_EN.get(row["event_type"], row["event_type"]), row["details_json"]])
+    return Response("\ufeff" + buf.getvalue(), mimetype="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="linewatch_events_{days}days.csv"'})
 
 
 @app.route("/export/isp.txt")
 @app.route("/export/aruba.txt")
 def export_isp():
     days = min(max(int(request.args.get("days", "30")), 1), 3650)
-    lang = request.args.get("lang", "it").lower()
-    labels = LABELS_EN if lang == "en" else LABELS_IT
-
-    conn = db()
-    rows = conn.execute(
-        "SELECT * FROM events WHERE start_ts >= ? ORDER BY start_ts ASC",
-        (since_iso(days),),
-    ).fetchall()
-    sample = conn.execute("SELECT * FROM samples ORDER BY id DESC LIMIT 1").fetchone()
-    conn.close()
-
+    lang = request.args.get("lang", "it").lower(); labels = LABELS_EN if lang == "en" else LABELS_IT
+    conn = db(); rows = conn.execute("SELECT * FROM events WHERE start_ts >= ? ORDER BY start_ts ASC", (since_iso(days),)).fetchall(); sample = conn.execute("SELECT * FROM samples ORDER BY id DESC LIMIT 1").fetchone(); conn.close()
     reboots = [row for row in rows if row["event_type"] == "FRITZBOX_REBOOT_DETECTED"]
     wan_resets = [row for row in rows if row["event_type"] == "WAN_SESSION_RESET_DETECTED"]
     outages = [row for row in rows if row["event_type"] in OUTAGE_TYPES]
     downtime = sum(float(row["duration_s"] or 0) for row in outages)
-    enhanced = fritz_telemetry_present(sample)
-    temp = row_value(sample, "router_cpu_temp_c")
+    enhanced = fritz_telemetry_present(sample); temp = row_value(sample, "router_cpu_temp_c")
     generated = datetime.now().astimezone().isoformat(timespec="seconds")
-
     if lang == "en":
-        lines = [
-            "UPLINKWITNESS - ISP CONNECTION DIAGNOSTIC REPORT",
-            "=" * 48,
-            f"Period analysed: last {days} days",
-            f"Generated: {generated}",
-            "",
-        ]
+        lines = ["UPLINKWITNESS - ISP CONNECTION DIAGNOSTIC REPORT", "=" * 48, f"Period analysed: last {days} days", f"Generated: {generated}", ""]
         if sample:
-            lines += [
-                f"Gateway: {sample['gateway'] or '-'}",
-                f"Public IP: {sample['public_ip'] or '-'}",
-                f"Host link: {row_value(sample, 'interface_speed_mbps') or '-'} Mbps / {row_value(sample, 'interface_duplex') or '-'}",
-                f"Gateway neighbour state: {row_value(sample, 'gateway_neighbor_state') or '-'}",
-                f"IPv6 probe: {row_value(sample, 'ipv6_ok') if row_value(sample, 'ipv6_ok') is not None else '-'}",
-                f"TCP probe: {row_value(sample, 'tcp_ms') if row_value(sample, 'tcp_ok') else '-'} ms",
-            ]
+            lines += [f"Gateway: {sample['gateway'] or '-'}", f"Public IP: {sample['public_ip'] or '-'}", f"Host link: {row_value(sample, 'interface_speed_mbps') or '-'} Mbps / {row_value(sample, 'interface_duplex') or '-'}", f"Gateway neighbour state: {row_value(sample, 'gateway_neighbor_state') or '-'}", f"Recent ICMP loss: {row_value(sample, 'icmp_loss_pct') if row_value(sample, 'icmp_loss_pct') is not None else '-'}%", f"Recent ICMP jitter: {row_value(sample, 'icmp_jitter_ms') if row_value(sample, 'icmp_jitter_ms') is not None else '-'} ms", f"IPv6 probe: {row_value(sample, 'ipv6_ok') if row_value(sample, 'ipv6_ok') is not None else '-'}", f"TCP probe: {row_value(sample, 'tcp_ms') if row_value(sample, 'tcp_ok') else '-'} ms"]
             if enhanced:
-                lines += [
-                    f"Router: {sample['router_model'] or '-'}",
-                    f"FRITZ!OS: {sample['fritzos'] or '-'}",
-                    f"Current WAN status: {sample['wan_status'] or '-'}",
-                    f"Physical WAN: {row_value(sample, 'wan_access_type') or '-'} / {row_value(sample, 'wan_physical_status') or '-'}",
-                    f"WAN activity: down {format_rate(row_value(sample, 'wan_down_bytes_s'))} / up {format_rate(row_value(sample, 'wan_up_bytes_s'))}",
-                    f"WAN sync: {row_value(sample, 'wan_sync_group') or '-'} / {row_value(sample, 'wan_sync_mode') or '-'}",
-                    f"Current router uptime: {fmt_duration(sample['router_uptime_s'])}",
-                    f"Current WAN uptime: {fmt_duration(sample['wan_uptime_s'])}",
-                    f"Current WAN IP: {sample['wan_ip'] or '-'}",
-                    f"Router CPU temperature: {f'{temp:.1f} C' if temp is not None else '-'}",
-                    f"Transport: {sample['wan_transport'] or '-'}",
-                    f"PPPoE AC/PoP: {sample['pppoe_ac_name'] or '-'}",
-                ]
+                lines += [f"Router: {sample['router_model'] or '-'}", f"FRITZ!OS: {sample['fritzos'] or '-'}", f"Current WAN status: {sample['wan_status'] or '-'}", f"Physical WAN: {row_value(sample, 'wan_access_type') or '-'} / {row_value(sample, 'wan_physical_status') or '-'}", f"WAN activity: down {format_rate(row_value(sample, 'wan_down_bytes_s'))} / up {format_rate(row_value(sample, 'wan_up_bytes_s'))}", f"WAN sync: {row_value(sample, 'wan_sync_group') or '-'} / {row_value(sample, 'wan_sync_mode') or '-'}", f"Current router uptime: {fmt_duration(sample['router_uptime_s'])}", f"Current WAN uptime: {fmt_duration(sample['wan_uptime_s'])}", f"Current WAN IP: {sample['wan_ip'] or '-'}", f"Router CPU temperature: {f'{temp:.1f} C' if temp is not None else '-'}", f"Transport: {sample['wan_transport'] or '-'}", f"PPPoE AC/PoP: {sample['pppoe_ac_name'] or '-'}"]
                 if row_value(sample, "fiber_rx_dbm") is not None:
-                    lines += [
-                        f"Fiber mode: {row_value(sample, 'fiber_mode') or '-'}",
-                        f"Fiber RX optical level: {row_value(sample, 'fiber_rx_dbm')} dBm",
-                        f"Fiber TX optical level: {row_value(sample, 'fiber_tx_dbm')} dBm",
-                    ]
+                    lines += [f"Fiber mode: {row_value(sample, 'fiber_mode') or '-'}", f"Fiber RX optical level: {row_value(sample, 'fiber_rx_dbm')} dBm", f"Fiber TX optical level: {row_value(sample, 'fiber_tx_dbm')} dBm"]
             lines.append("")
         if enhanced:
-            lines += [
-                f"FRITZ!Box reboots detected: {len(reboots)}",
-                f"WAN/PPPoE session resets: {len(wan_resets)}",
-            ]
-        lines += [
-            f"Recorded outages: {len(outages)}",
-            f"Total recorded downtime: {fmt_duration(downtime)}",
-            "",
-            "EVENT TIMELINE",
-            "-" * 48,
-        ]
+            lines += [f"FRITZ!Box reboots detected: {len(reboots)}", f"WAN/PPPoE session resets: {len(wan_resets)}"]
+        lines += [f"Recorded outages: {len(outages)}", f"Total recorded downtime: {fmt_duration(downtime)}", "", "EVENT TIMELINE", "-" * 48]
     else:
-        lines = [
-            "UPLINKWITNESS - REPORT DIAGNOSTICO CONNESSIONE / ISP",
-            "=" * 46,
-            f"Periodo analizzato: ultimi {days} giorni",
-            f"Generato: {generated}",
-            "",
-        ]
+        lines = ["UPLINKWITNESS - REPORT DIAGNOSTICO CONNESSIONE / ISP", "=" * 46, f"Periodo analizzato: ultimi {days} giorni", f"Generato: {generated}", ""]
         if sample:
-            lines += [
-                f"Gateway: {sample['gateway'] or '-'}",
-                f"IP pubblico: {sample['public_ip'] or '-'}",
-                f"Link host: {row_value(sample, 'interface_speed_mbps') or '-'} Mbps / {row_value(sample, 'interface_duplex') or '-'}",
-                f"Stato neighbor gateway: {row_value(sample, 'gateway_neighbor_state') or '-'}",
-                f"Probe IPv6: {row_value(sample, 'ipv6_ok') if row_value(sample, 'ipv6_ok') is not None else '-'}",
-                f"Probe TCP: {row_value(sample, 'tcp_ms') if row_value(sample, 'tcp_ok') else '-'} ms",
-            ]
+            lines += [f"Gateway: {sample['gateway'] or '-'}", f"IP pubblico: {sample['public_ip'] or '-'}", f"Link host: {row_value(sample, 'interface_speed_mbps') or '-'} Mbps / {row_value(sample, 'interface_duplex') or '-'}", f"Stato neighbor gateway: {row_value(sample, 'gateway_neighbor_state') or '-'}", f"Loss ICMP recente: {row_value(sample, 'icmp_loss_pct') if row_value(sample, 'icmp_loss_pct') is not None else '-'}%", f"Jitter ICMP recente: {row_value(sample, 'icmp_jitter_ms') if row_value(sample, 'icmp_jitter_ms') is not None else '-'} ms", f"Probe IPv6: {row_value(sample, 'ipv6_ok') if row_value(sample, 'ipv6_ok') is not None else '-'}", f"Probe TCP: {row_value(sample, 'tcp_ms') if row_value(sample, 'tcp_ok') else '-'} ms"]
             if enhanced:
-                lines += [
-                    f"Router: {sample['router_model'] or '-'}",
-                    f"FRITZ!OS: {sample['fritzos'] or '-'}",
-                    f"Stato WAN attuale: {sample['wan_status'] or '-'}",
-                    f"WAN fisica: {row_value(sample, 'wan_access_type') or '-'} / {row_value(sample, 'wan_physical_status') or '-'}",
-                    f"Attività WAN: down {format_rate(row_value(sample, 'wan_down_bytes_s'))} / up {format_rate(row_value(sample, 'wan_up_bytes_s'))}",
-                    f"Sync WAN: {row_value(sample, 'wan_sync_group') or '-'} / {row_value(sample, 'wan_sync_mode') or '-'}",
-                    f"Uptime router attuale: {fmt_duration(sample['router_uptime_s'])}",
-                    f"Uptime WAN attuale: {fmt_duration(sample['wan_uptime_s'])}",
-                    f"IP WAN attuale: {sample['wan_ip'] or '-'}",
-                    f"Temperatura CPU router: {f'{temp:.1f} C' if temp is not None else '-'}",
-                    f"Trasporto: {sample['wan_transport'] or '-'}",
-                    f"PPPoE AC/PoP: {sample['pppoe_ac_name'] or '-'}",
-                ]
+                lines += [f"Router: {sample['router_model'] or '-'}", f"FRITZ!OS: {sample['fritzos'] or '-'}", f"Stato WAN attuale: {sample['wan_status'] or '-'}", f"WAN fisica: {row_value(sample, 'wan_access_type') or '-'} / {row_value(sample, 'wan_physical_status') or '-'}", f"Attività WAN: down {format_rate(row_value(sample, 'wan_down_bytes_s'))} / up {format_rate(row_value(sample, 'wan_up_bytes_s'))}", f"Sync WAN: {row_value(sample, 'wan_sync_group') or '-'} / {row_value(sample, 'wan_sync_mode') or '-'}", f"Uptime router attuale: {fmt_duration(sample['router_uptime_s'])}", f"Uptime WAN attuale: {fmt_duration(sample['wan_uptime_s'])}", f"IP WAN attuale: {sample['wan_ip'] or '-'}", f"Temperatura CPU router: {f'{temp:.1f} C' if temp is not None else '-'}", f"Trasporto: {sample['wan_transport'] or '-'}", f"PPPoE AC/PoP: {sample['pppoe_ac_name'] or '-'}"]
                 if row_value(sample, "fiber_rx_dbm") is not None:
-                    lines += [
-                        f"Modalità fibra: {row_value(sample, 'fiber_mode') or '-'}",
-                        f"Livello ottico RX fibra: {row_value(sample, 'fiber_rx_dbm')} dBm",
-                        f"Livello ottico TX fibra: {row_value(sample, 'fiber_tx_dbm')} dBm",
-                    ]
+                    lines += [f"Modalità fibra: {row_value(sample, 'fiber_mode') or '-'}", f"Livello ottico RX fibra: {row_value(sample, 'fiber_rx_dbm')} dBm", f"Livello ottico TX fibra: {row_value(sample, 'fiber_tx_dbm')} dBm"]
             lines.append("")
         if enhanced:
-            lines += [
-                f"Riavvii FRITZ!Box rilevati: {len(reboots)}",
-                f"Reset sessione WAN/PPPoE: {len(wan_resets)}",
-            ]
-        lines += [
-            f"Interruzioni registrate: {len(outages)}",
-            f"Downtime totale registrato: {fmt_duration(downtime)}",
-            "",
-            "CRONOLOGIA EVENTI",
-            "-" * 46,
-        ]
-
+            lines += [f"Riavvii FRITZ!Box rilevati: {len(reboots)}", f"Reset sessione WAN/PPPoE: {len(wan_resets)}"]
+        lines += [f"Interruzioni registrate: {len(outages)}", f"Downtime totale registrato: {fmt_duration(downtime)}", "", "CRONOLOGIA EVENTI", "-" * 46]
     if not rows:
-        lines.append(
-            "No events in the selected period."
-            if lang == "en"
-            else "Nessun evento nel periodo selezionato."
-        )
+        lines.append("No events in the selected period." if lang == "en" else "Nessun evento nel periodo selezionato.")
     else:
         for row in rows:
             line = f"{row['start_ts']} | {labels.get(row['event_type'], row['event_type'])}"
             if row["duration_s"]:
                 line += f" | {fmt_duration(row['duration_s'])}"
             lines.append(line)
-
     suffix = "en" if lang == "en" else "it"
-    return Response(
-        "\n".join(lines) + "\n",
-        mimetype="text/plain; charset=utf-8",
-        headers={
-            "Content-Disposition": f'attachment; filename="linewatch_isp_report_{suffix}_{days}days.txt"'
-        },
-    )
+    return Response("\n".join(lines) + "\n", mimetype="text/plain; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="linewatch_isp_report_{suffix}_{days}days.txt"'})
 
 
 if __name__ == "__main__":
