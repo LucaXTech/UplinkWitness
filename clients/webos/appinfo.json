@@ -10,5 +10,6 @@
   "largeIcon": "largeicon.png",
   "iconColor": "#111827",
   "resolution": "1920x1080",
+  "handlesRelaunch": true,
   "transparent": false
 }
