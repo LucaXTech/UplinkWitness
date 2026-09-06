@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+  <title>UplinkWitness TV</title>
+  <style>
+    html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#070b14;color:#f7f9fc;font-family:Arial,Helvetica,sans-serif}
+    *{box-sizing:border-box}
+    #frame{position:absolute;top:0;right:0;bottom:0;left:0;width:100%;height:100%;border:0;background:#070b14}
+    #setup,#loading{position:absolute;top:0;right:0;bottom:0;left:0;z-index:10;display:none;align-items:center;justify-content:center;background:#070b14}
+    .panel{width:840px;padding:54px;border:2px solid #243149;border-radius:28px;background:#111827;box-shadow:0 24px 80px rgba(0,0,0,.45)}
+    .brand{font-size:56px;font-weight:800;letter-spacing:-1px}.muted{color:#93a4bd}.tag{font-size:26px;margin-top:12px}
+    label{display:block;font-size:24px;margin-top:44px;margin-bottom:14px;color:#cbd5e1}
+    input{width:100%;height:74px;border:3px solid #334155;border-radius:16px;background:#0b1220;color:white;font-size:30px;padding:0 22px;outline:none}
+    input:focus{border-color:#6da8ff}
+    .buttons{display:flex;margin-top:26px}.buttons button{margin-right:18px}
+    button{min-width:180px;height:68px;border:3px solid transparent;border-radius:16px;background:#26344d;color:#f7f9fc;font-size:25px;font-weight:700;padding:0 26px}
+    button:focus{outline:none;border-color:#f7f9fc;background:#31517e}
+    button.primary{background:#2f69a9}
+    .hint{font-size:20px;line-height:1.5;margin-top:28px;color:#93a4bd}
+    .error{min-height:28px;margin-top:18px;color:#ff8c8c;font-size:22px}
+    #loading .panel{text-align:center;width:680px}.spinner{width:58px;height:58px;border:7px solid #243149;border-top-color:#6da8ff;border-radius:50%;margin:30px auto;animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
+    #settingsButton{position:absolute;z-index:6;left:26px;bottom:22px;min-width:0;width:auto;height:auto;padding:9px 14px;border:1px solid #334155;border-radius:10px;background:rgba(7,11,20,.78);color:#93a4bd;font-size:16px;font-weight:600}
+    #settingsButton:focus,#settingsButton:hover{color:#f7f9fc;border-color:#6da8ff;background:#111827}
+  </style>
+</head>
+<body>
+  <iframe id="frame" title="UplinkWitness TV"></iframe>
+  <button id="settingsButton" type="button">Server settings</button>
+
+  <div id="setup">
+    <div class="panel">
+      <div class="brand">UplinkWitness <span class="muted">TV</span></div>
+      <div class="tag muted">Connect this TV to your UplinkWitness host.</div>
+      <label for="server">Server URL</label>
+      <input id="server" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="http://your-host.local:8080">
+      <div id="error" class="error"></div>
+      <div class="buttons">
+        <button id="connect" class="primary">Connect</button>
+        <button id="cancel">Cancel</button>
+      </div>
+      <div class="hint">Use the address shown by UplinkWitness after installation, for example http://your-host.local:8080, or the host LAN IP such as http://192.168.x.x:8080.<br>Use Server settings with the Magic Remote if you need to change the host later.</div>
+    </div>
+  </div>
+
+  <div id="loading">
+    <div class="panel">
+      <div class="brand">UplinkWitness</div>
+      <div class="spinner"></div>
+      <div id="loadingText" class="tag muted">Opening dashboard…</div>
+    </div>
+  </div>
+
+<script>
+(function(){
+  var KEY='uplinkwitness.server';
+  var frame=document.getElementById('frame');
+  var setup=document.getElementById('setup');
+  var loading=document.getElementById('loading');
+  var input=document.getElementById('server');
+  var error=document.getElementById('error');
+  var cancel=document.getElementById('cancel');
+  var timer=null;
+
+  function cleanUrl(value){
+    value=(value||'').replace(/^\s+|\s+$/g,'').replace(/\/+$/,'');
+    if(value && !/^https?:\/\//i.test(value)){value='http://'+value;}
+    return value;
+  }
+  function showSetup(canCancel){
+    if(timer){clearTimeout(timer);timer=null;}
+    loading.style.display='none';
+    setup.style.display='flex';
+    var saved=localStorage.getItem(KEY);
+    if(saved){input.value=saved;}
+    cancel.style.display=canCancel?'inline-block':'none';
+    error.textContent='';
+    setTimeout(function(){input.focus();input.select();},100);
+  }
+  function showLoading(text){
+    setup.style.display='none';
+    document.getElementById('loadingText').textContent=text||'Opening dashboard…';
+    loading.style.display='flex';
+  }
+  function openServer(value){
+    var server=cleanUrl(value);
+    if(!server){error.textContent='Enter the UplinkWitness server URL.';return;}
+    localStorage.setItem(KEY,server);
+    showLoading('Connecting to '+server+' …');
+    frame.src=server+'/wallboard?webos=1';
+    timer=setTimeout(function(){loading.style.display='none';},7000);
+  }
+  function activateApp(){
+    try{
+      if(window.PalmSystem && PalmSystem.activate){PalmSystem.activate();}
+      else if(window.webOSSystem && webOSSystem.activate){webOSSystem.activate();}
+    }catch(e){}
+  }
+  function handleLaunch(data){
+    var detail=data && data.detail ? data.detail : {};
+    if(detail.server){openServer(detail.server);}
+    activateApp();
+  }
+  function initialLaunchServer(){
+    try{
+      if(window.PalmSystem && PalmSystem.launchParams){
+        var params=JSON.parse(PalmSystem.launchParams);
+        if(params && params.server){return params.server;}
+      }
+    }catch(e){}
+    return '';
+  }
+
+  document.addEventListener('webOSLaunch',handleLaunch,true);
+  document.addEventListener('webOSRelaunch',handleLaunch,true);
+  frame.addEventListener('load',function(){
+    if(timer){clearTimeout(timer);timer=null;}
+    loading.style.display='none';
+    setup.style.display='none';
+    try{frame.contentWindow.focus();}catch(e){}
+  });
+  document.getElementById('connect').addEventListener('click',function(){openServer(input.value);});
+  document.getElementById('settingsButton').addEventListener('click',function(){showSetup(!!frame.src);});
+  cancel.addEventListener('click',function(){setup.style.display='none';try{frame.contentWindow.focus();}catch(e){}});
+  input.addEventListener('keydown',function(e){if((e.keyCode||e.which)===13){openServer(input.value);}});
+  document.addEventListener('keydown',function(e){
+    var code=e.keyCode||e.which;
+    if(code===405 || code===83){e.preventDefault();showSetup(!!frame.src);return;}
+    if(code===461 && setup.style.display==='flex' && frame.src){e.preventDefault();setup.style.display='none';try{frame.contentWindow.focus();}catch(x){}}
+  });
+
+  var launchServer=initialLaunchServer();
+  var saved=localStorage.getItem(KEY);
+  if(launchServer){openServer(launchServer);}
+  else if(saved){openServer(saved);}
+  else{showSetup(false);}
+})();
+</script>
+</body>
+</html>

@@ -22,4 +22,26 @@ jobs:
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
       - name: Check shell scripts
-        run: bash -n install.sh configure.sh run_monitor.sh run_dashboard.sh
+        run: bash -n install.sh configure.sh run_monitor.sh run_dashboard.sh clients/webos/renew-devmode.sh clients/webos/install-renewal-timer.sh
+
+  webos-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "16.20.2"
+      - name: Install LG webOS CLI
+        run: npm install -g @webos-tools/cli
+      - name: Package UplinkWitness TV
+        run: |
+          mkdir -p dist/webos
+          ares-package ./clients/webos
+          mv com.lucaxtech.app.uplinkwitness_*.ipk dist/webos/
+          ls -lh dist/webos/
+      - name: Upload webOS IPK
+        uses: actions/upload-artifact@v4
+        with:
+          name: uplinkwitness-tv-ipk
+          path: dist/webos/*.ipk
+          if-no-files-found: error
