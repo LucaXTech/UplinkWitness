@@ -29,10 +29,10 @@ The v1.3 development target groups the next diagnostic work into one coherent re
 - IPv6 reachability when the host has an IPv6 default route
 - interface speed/duplex when exposed by Linux sysfs
 - gateway neighbour/ARP state
-- explicit default-route/interface changes
-- ICMP packet-loss and jitter windows derived from observed samples
+- explicit default-route/interface changes, including disappearance/restoration
+- recent ICMP packet-loss and jitter evidence derived from every live probe in a rolling window
 
-These remain best-effort and must not require router credentials.
+TCP and IPv6 are auxiliary evidence sampled at their own cadence; cached auxiliary results must not mask a current outage classification. These features remain best-effort and must not require router credentials.
 
 ### Router adapter boundary
 
@@ -44,12 +44,13 @@ This boundary is intended to unblock future OpenWrt/MikroTik/UniFi work without 
 
 - `WANCommonInterfaceConfig` as the primary physical-WAN evidence source
 - active WAN access type and physical link status
-- Online Monitor sync group/mode and activity evidence
+- current WAN activity from the newest documented utilization sample, with Online Monitor downstream/upstream arrays as fallback
+- Online Monitor sync group/mode context
 - physical-WAN/access-type change events for correlation
 - active-fiber optical diagnostics through `X_AVM-DE_WANFiber` only when the WAN access type actually indicates fiber
 - no persistence of SFP/GPON serial identifiers
 
-Media-specific services remain secondary/model-dependent when they conflict with WANCommon telemetry.
+Media-specific services remain secondary/model-dependent when they conflict with WANCommon telemetry. Multicast-rate telemetry is not substituted for ordinary downstream activity.
 
 ### Dashboard / wallboard
 
