@@ -27,6 +27,9 @@ canvas{display:block;width:100%;height:250px;background:#0b1220;border:1px solid
 .statusGood{color:#4bd37b}.statusBad{color:#ff8c8c}.statusMuted{color:#93a4bd}
 .events{border:2px solid #243149;border-radius:18px;background:#111827;overflow:hidden}.event{display:flex;align-items:center;min-height:76px;padding:14px 20px;border-bottom:1px solid #243149}.event:last-child{border-bottom:0}.eventType{width:44%;font-size:22px;font-weight:700}.eventTime{width:36%;color:#cbd5e1;font-size:18px}.eventDuration{width:20%;text-align:right;color:#93a4bd;font-size:18px}.empty{padding:40px;color:#93a4bd;font-size:22px;text-align:center}
 .footer{display:flex;justify-content:space-between;margin-top:18px;color:#697b96;font-size:15px}.keys{color:#93a4bd}
+html.webos .app{padding-bottom:18px}
+html.webos #view-overview{padding-top:18px}
+html.webos #view-overview .split{margin-top:8px}
 @media(max-width:900px){.app{padding:16px}.topbar{display:block}.clock{text-align:left;margin-top:12px}.nav{overflow-x:auto}.nav button{min-width:145px;font-size:18px}.state{font-size:34px}.heroMeta{display:none}.card{width:50%}.split{display:block}.panelWrap.wide,.panelWrap.narrow{width:100%}.footer{display:none}}
 </style>
 </head>
@@ -100,6 +103,7 @@ canvas{display:block;width:100%;height:250px;background:#0b1220;border:1px solid
 </div>
 
 <script>
+if(/(?:^|[?&])webos=1(?:&|$)/.test(window.location.search)){document.documentElement.className+=' webos'}
 var lastHistory=[];
 var lastStatus=null;
 var viewNames=['overview','network','router','incidents'];
