@@ -192,6 +192,87 @@ class MonitorTests(unittest.TestCase):
         fritz.fc.get_cpu_temperatures.side_effect = RuntimeError("unsupported")
         self.assertIsNone(fritz._cpu_temperature())
 
+    def test_estimated_router_boot_time_uses_current_uptime(self):
+        boot = monitor.estimated_router_boot_time(
+            "2026-09-06T03:15:41+02:00", 119
+        )
+        self.assertEqual(boot.isoformat(timespec="seconds"), "2026-09-06T03:13:42+02:00")
+
+    def test_reboot_association_uses_outage_containing_estimated_boot(self):
+        conn = self.event_db()
+        target_id = monitor.add_event(
+            conn,
+            "NETWORK_LINK_DOWN",
+            {},
+            start="2026-09-06T03:13:15+02:00",
+            end="2026-09-06T03:14:29+02:00",
+            duration=74.0,
+        )
+        monitor.add_event(
+            conn,
+            "DNS_FAILURE",
+            {},
+            start="2026-09-06T03:15:00+02:00",
+            end="2026-09-06T03:15:10+02:00",
+            duration=10.0,
+        )
+        reboot_id = monitor.add_event(
+            conn,
+            "FRITZBOX_REBOOT_DETECTED",
+            {},
+            start="2026-09-06T03:15:41+02:00",
+            end="2026-09-06T03:15:41+02:00",
+            duration=0,
+        )
+        related = monitor.associate_reboot_with_incident(
+            conn,
+            reboot_id,
+            "2026-09-06T03:15:41+02:00",
+            {
+                "previous_router_uptime_s": 43246,
+                "current_router_uptime_s": 119,
+            },
+        )
+        self.assertEqual(related, target_id)
+        details = json.loads(
+            conn.execute("SELECT details_json FROM events WHERE id=?", (target_id,)).fetchone()[0]
+        )
+        self.assertEqual(
+            details["confirmed_router_reboot"]["estimated_boot_ts"],
+            "2026-09-06T03:13:42+02:00",
+        )
+        conn.close()
+
+    def test_reboot_association_does_not_use_unrelated_recent_outage(self):
+        conn = self.event_db()
+        monitor.add_event(
+            conn,
+            "DNS_FAILURE",
+            {},
+            start="2026-09-06T03:15:00+02:00",
+            end="2026-09-06T03:15:10+02:00",
+            duration=10.0,
+        )
+        reboot_id = monitor.add_event(
+            conn,
+            "FRITZBOX_REBOOT_DETECTED",
+            {},
+            start="2026-09-06T03:15:41+02:00",
+            end="2026-09-06T03:15:41+02:00",
+            duration=0,
+        )
+        related = monitor.associate_reboot_with_incident(
+            conn,
+            reboot_id,
+            "2026-09-06T03:15:41+02:00",
+            {
+                "previous_router_uptime_s": 43246,
+                "current_router_uptime_s": 119,
+            },
+        )
+        self.assertIsNone(related)
+        conn.close()
+
     def test_incident_escalation_reuses_one_event_row(self):
         conn = self.event_db()
         start = "2026-09-06T03:13:15+02:00"
