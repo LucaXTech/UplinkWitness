@@ -100,10 +100,10 @@ class MonitorTests(unittest.TestCase):
         sample = self.sample(gateway_ok=0, gateway_ms=None, internet_ok=0, internet_ms=None)
         self.assertEqual(monitor.classify(sample, gateway_probe_active=True), "OK")
 
-    def test_tcp_path_prevents_false_complete_outage(self):
+    def test_cached_tcp_evidence_does_not_mask_current_complete_outage(self):
         sample = self.sample(
-            gateway_ok=0,
-            gateway_ms=None,
+            gateway_ok=1,
+            gateway_ms=1.0,
             internet_ok=0,
             internet_ms=None,
             dns_ok=0,
@@ -113,7 +113,10 @@ class MonitorTests(unittest.TestCase):
             tcp_ok=1,
             tcp_ms=15.0,
         )
-        self.assertEqual(monitor.classify(sample, gateway_probe_active=True), "DNS_FAILURE")
+        self.assertEqual(
+            monitor.classify(sample, gateway_probe_active=True),
+            "INTERNET_UNREACHABLE",
+        )
 
     def test_gateway_unreachable_when_probe_is_supported_and_all_paths_fail(self):
         sample = self.sample(
@@ -182,7 +185,7 @@ class MonitorTests(unittest.TestCase):
     def test_ipv6_default_route_is_parsed(self, _):
         self.assertEqual(monitor.default_route(6), ("fe80::1", "eth0"))
 
-    def test_route_change_requires_two_known_different_routes(self):
+    def test_route_change_records_replacement_disappearance_and_restore(self):
         self.assertIsNone(monitor.route_change(None, ("192.0.2.1", "eth0")))
         self.assertIsNone(
             monitor.route_change(("192.0.2.1", "eth0"), ("192.0.2.1", "eth0"))
@@ -192,6 +195,12 @@ class MonitorTests(unittest.TestCase):
         )
         self.assertEqual(change["previous_interface"], "eth0")
         self.assertEqual(change["new_interface"], "eth1")
+        disappeared = monitor.route_change(("192.0.2.1", "eth0"), (None, None))
+        self.assertEqual(disappeared["previous_gateway"], "192.0.2.1")
+        self.assertIsNone(disappeared["new_gateway"])
+        restored = monitor.route_change((None, None), ("192.0.2.1", "eth0"))
+        self.assertIsNone(restored["previous_gateway"])
+        self.assertEqual(restored["new_gateway"], "192.0.2.1")
 
     def test_interface_details_reads_speed_and_duplex(self):
         with tempfile.TemporaryDirectory() as tmp:
