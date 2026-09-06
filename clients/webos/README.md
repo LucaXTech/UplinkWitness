@@ -99,4 +99,22 @@ The graphics target is 1920x1080.
 
 ## Developer Mode renewal
 
-Automated session renewal from the Raspberry Pi is intentionally a separate deployment task. First validate that the 0.1.0 app packages, installs, launches and survives a normal restart on the physical OLED55E8PLA.
+LG Developer Mode sessions expire unless they are extended. With the current `@webos-tools/cli`, renewal is performed by launching the Developer Mode app with the extension parameter:
+
+    ares-launch --device livingroom-tv com.palmdts.devmode -p "extend=true"
+
+This command has been physically validated on the OLED55E8PLA and returned the displayed remaining session to approximately 1000 hours.
+
+For an always-on Raspberry Pi or Linux host, first register the TV and retrieve its key for the same Linux user that runs UplinkWitness. Then install the included weekly systemd timer:
+
+    ./clients/webos/install-renewal-timer.sh livingroom-tv
+
+The installer performs one real renewal before installing anything, copies the renewal helper to `/usr/local/lib/uplinkwitness/`, and enables `uplinkwitness-webos-renew.timer`. The timer renews approximately once per week and also schedules an attempt after the Linux host boots.
+
+Useful checks:
+
+    systemctl list-timers uplinkwitness-webos-renew.timer
+    sudo systemctl start uplinkwitness-webos-renew.service
+    journalctl -u uplinkwitness-webos-renew.service
+
+The timer contains no TV IP address or host-specific UplinkWitness URL. It uses the webOS device alias already registered by `ares-setup-device` for the Linux user.
