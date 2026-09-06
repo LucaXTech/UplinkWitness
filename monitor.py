@@ -64,6 +64,7 @@ INCIDENT_PRIORITY = {
     "NETWORK_LINK_DOWN": 60,
 }
 REBOOT_ASSOCIATION_SECONDS = max(180.0, RING_SECONDS)
+REBOOT_ASSOCIATION_TOLERANCE_SECONDS = max(15.0, FRITZ_EVERY * 2)
 
 
 def now():
@@ -327,51 +328,94 @@ def close_event(conn, event_id, details, duration, end=None):
     conn.commit()
 
 
+def estimated_router_boot_time(detected_ts, current_router_uptime_s):
+    """Estimate the router boot timestamp from detection time and current uptime."""
+    try:
+        detected = datetime.fromisoformat(detected_ts)
+        uptime = float(current_router_uptime_s)
+    except (TypeError, ValueError):
+        return None
+    if uptime < 0:
+        return None
+    return detected - timedelta(seconds=uptime)
+
+
+def _incident_matches_boot(start_ts, end_ts, boot_time, tolerance_s):
+    try:
+        start = datetime.fromisoformat(start_ts)
+        end = datetime.fromisoformat(end_ts) if end_ts else None
+    except (TypeError, ValueError):
+        return False
+    lower = start - timedelta(seconds=tolerance_s)
+    upper = (end or boot_time) + timedelta(seconds=tolerance_s)
+    return lower <= boot_time <= upper
+
+
 def associate_reboot_with_incident(
     conn, reboot_event_id, detected_ts, reboot_details, open_event_id=None, open_details=None
 ):
-    """Attach a confirmed reboot to the active or just-ended outage."""
-    if open_event_id is not None and open_details is not None:
-        open_details["confirmed_router_reboot"] = {
-            "event_id": reboot_event_id,
-            "detected_ts": detected_ts,
-            "previous_router_uptime_s": reboot_details.get("previous_router_uptime_s"),
-            "current_router_uptime_s": reboot_details.get("current_router_uptime_s"),
-        }
-        update_event(conn, open_event_id, details=open_details)
-        return open_event_id
-
-    row = conn.execute(
-        """SELECT id,end_ts,details_json
-           FROM events
-           WHERE duration_s IS NOT NULL
-             AND event_type IN (?,?,?,?,?,?)
-           ORDER BY end_ts DESC LIMIT 1""",
-        tuple(INCIDENT_PRIORITY),
-    ).fetchone()
-    if not row or not row[1]:
+    """Attach a confirmed reboot to the outage containing the estimated boot time."""
+    boot_time = estimated_router_boot_time(
+        detected_ts, reboot_details.get("current_router_uptime_s")
+    )
+    if boot_time is None:
         return None
 
-    try:
-        detected = datetime.fromisoformat(detected_ts)
-        ended = datetime.fromisoformat(row[1])
-    except Exception:
-        return None
-    if (detected - ended).total_seconds() < 0:
-        return None
-    if (detected - ended).total_seconds() > REBOOT_ASSOCIATION_SECONDS:
-        return None
-
-    try:
-        details = json.loads(row[2] or "{}")
-    except Exception:
-        details = {}
-    details["confirmed_router_reboot"] = {
+    association = {
         "event_id": reboot_event_id,
         "detected_ts": detected_ts,
+        "estimated_boot_ts": boot_time.isoformat(timespec="seconds"),
         "previous_router_uptime_s": reboot_details.get("previous_router_uptime_s"),
         "current_router_uptime_s": reboot_details.get("current_router_uptime_s"),
     }
+
+    if open_event_id is not None and open_details is not None:
+        row = conn.execute(
+            "SELECT start_ts FROM events WHERE id=?", (open_event_id,)
+        ).fetchone()
+        if row and _incident_matches_boot(
+            row[0], None, boot_time, REBOOT_ASSOCIATION_TOLERANCE_SECONDS
+        ):
+            open_details["confirmed_router_reboot"] = association
+            update_event(conn, open_event_id, details=open_details)
+            return open_event_id
+
+    rows = conn.execute(
+        """SELECT id,start_ts,end_ts,details_json
+           FROM events
+           WHERE duration_s IS NOT NULL
+             AND event_type IN (?,?,?,?,?,?)
+           ORDER BY end_ts DESC LIMIT 20""",
+        tuple(INCIDENT_PRIORITY),
+    ).fetchall()
+
+    exact = []
+    tolerant = []
+    for row in rows:
+        try:
+            start = datetime.fromisoformat(row[1])
+            end = datetime.fromisoformat(row[2])
+        except (TypeError, ValueError):
+            continue
+        if start <= boot_time <= end:
+            exact.append((row, 0.0))
+            continue
+        if _incident_matches_boot(
+            row[1], row[2], boot_time, REBOOT_ASSOCIATION_TOLERANCE_SECONDS
+        ):
+            distance = min(abs((boot_time - start).total_seconds()), abs((boot_time - end).total_seconds()))
+            tolerant.append((row, distance))
+
+    candidates = exact or sorted(tolerant, key=lambda item: item[1])
+    if not candidates:
+        return None
+
+    row = candidates[0][0]
+    try:
+        details = json.loads(row[3] or "{}")
+    except Exception:
+        details = {}
+    details["confirmed_router_reboot"] = association
     update_event(conn, row[0], details=details)
     directory = EVENTS / f"event_{row[0]:05d}"
     if directory.exists():
