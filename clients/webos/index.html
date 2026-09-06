@@ -21,12 +21,13 @@
     .hint{font-size:20px;line-height:1.5;margin-top:28px;color:#93a4bd}
     .error{min-height:28px;margin-top:18px;color:#ff8c8c;font-size:22px}
     #loading .panel{text-align:center;width:680px}.spinner{width:58px;height:58px;border:7px solid #243149;border-top-color:#6da8ff;border-radius:50%;margin:30px auto;animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
-    #settingsBadge{position:absolute;z-index:5;left:26px;bottom:22px;padding:8px 13px;border-radius:10px;background:rgba(7,11,20,.72);color:#93a4bd;font-size:16px;pointer-events:none}
+    #settingsButton{position:absolute;z-index:6;left:26px;bottom:22px;min-width:0;width:auto;height:auto;padding:9px 14px;border:1px solid #334155;border-radius:10px;background:rgba(7,11,20,.78);color:#93a4bd;font-size:16px;font-weight:600}
+    #settingsButton:focus,#settingsButton:hover{color:#f7f9fc;border-color:#6da8ff;background:#111827}
   </style>
 </head>
 <body>
   <iframe id="frame" title="UplinkWitness TV"></iframe>
-  <div id="settingsBadge">Yellow: server settings</div>
+  <button id="settingsButton" type="button">Server settings</button>
 
   <div id="setup">
     <div class="panel">
@@ -39,7 +40,7 @@
         <button id="connect" class="primary">Connect</button>
         <button id="cancel">Cancel</button>
       </div>
-      <div class="hint">Example: http://linewatch.local:8080 or http://192.168.x.x:8080<br>Use the Yellow remote key at any time to reopen this screen.</div>
+      <div class="hint">Example: http://linewatch.local:8080 or http://192.168.x.x:8080<br>Use Server settings with the Magic Remote if you need to change the host later.</div>
     </div>
   </div>
 
@@ -97,6 +98,7 @@
     try{frame.contentWindow.focus();}catch(e){}
   });
   document.getElementById('connect').addEventListener('click',function(){openServer(input.value);});
+  document.getElementById('settingsButton').addEventListener('click',function(){showSetup(!!frame.src);});
   cancel.addEventListener('click',function(){setup.style.display='none';try{frame.contentWindow.focus();}catch(e){}});
   input.addEventListener('keydown',function(e){if((e.keyCode||e.which)===13){openServer(input.value);}});
   document.addEventListener('keydown',function(e){
