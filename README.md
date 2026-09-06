@@ -24,7 +24,7 @@ The current v1.3 development branch extends evidence quality without turning Upl
 - IPv6 reachability when Linux exposes an IPv6 default route
 - host interface speed/duplex and gateway neighbour state
 - default-route and host-link change evidence
-- 24 h ICMP loss/jitter statistics
+- recent rolling ICMP loss/jitter evidence calculated from every live probe
 - a stable router-adapter boundary
 - FRITZ!Box `WANCommonInterfaceConfig` physical-WAN status/access type
 - best-effort WAN activity and Online Monitor sync context
@@ -101,7 +101,9 @@ Stable v1.2.x detection includes:
 - latency trends
 - outage duration, total downtime and observed-period availability
 
-The v1.3 development branch additionally records TCP-connect evidence, IPv6 reachability when available, link speed/duplex, gateway-neighbour state, route changes and packet-loss/jitter windows.
+The v1.3 development branch additionally records TCP-connect evidence, IPv6 reachability when available, link speed/duplex, gateway-neighbour state, route changes and rolling packet-loss/jitter evidence.
+
+The loss/jitter window uses the raw live ICMP probe cadence rather than the lower-frequency healthy SQLite persistence cadence, avoiding a bias where outage samples would otherwise be over-represented. The default rolling window is 300 seconds and is configurable.
 
 UplinkWitness does **not** assume that every router or Internet path answers ICMP. In automatic gateway-probe mode, a router that drops ping while other connectivity paths remain healthy is not incorrectly classified as down.
 
@@ -210,7 +212,7 @@ FRITZ_PASSWORD=
 FRITZ_HOST=
 ```
 
-v1.3 development also exposes optional TCP/IPv6 probe controls:
+v1.3 development also exposes optional TCP/IPv6/quality-window controls:
 
 ```text
 LINEWATCH_TCP_HOST=1.1.1.1
@@ -218,6 +220,7 @@ LINEWATCH_TCP_PORT=443
 LINEWATCH_TCP_SECONDS=10
 LINEWATCH_IPV6_SECONDS=10
 LINEWATCH_IPV6_PING_TARGETS=2606:4700:4700::1111,2001:4860:4860::8888
+LINEWATCH_QUALITY_WINDOW_SECONDS=300
 ```
 
 IPv6 is only probed when the host has an IPv6 default route. Leaving `LINEWATCH_INTERFACE` empty lets UplinkWitness detect the interface associated with the Linux IPv4 default route.
@@ -280,7 +283,7 @@ Potential future integrations include OpenWrt, MikroTik, UniFi and standards-bas
 
 ## Development
 
-CI checks Python 3.11 and 3.13, compiles the monitor/dashboard, runs unit tests and validates the shell scripts.
+CI checks Python 3.11 and 3.13, compiles the monitor/dashboard/router-adapter modules, runs unit tests and validates the shell scripts.
 
 Run tests locally with:
 
