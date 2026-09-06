@@ -4,19 +4,22 @@ UplinkWitness is intentionally developed as a small, dependable Internet-connect
 
 The roadmap is ordered by reliability and evidence quality first, feature count second.
 
-## Current baseline — v1.1.x
+## Current baseline — v1.2.x
 
-The current stable baseline, originally released under the LineWatch name, provides:
+The current stable baseline provides:
 
 - vendor-neutral Linux monitoring
 - physical/link carrier detection where Linux exposes it
 - gateway, Internet, DNS and HTTP probes
-- public-IP change tracking
-- outage classification and local SQLite history
+- source-separated public-IP and router-WAN-IP change tracking
+- outage classification with in-place escalation to stronger evidence
+- local SQLite history and incident bundles
 - responsive dashboard and ISP-oriented reports
 - optional FRITZ!Box/TR-064 telemetry for deeper WAN diagnostics
+- FRITZ!Box reboot and WAN/PPPoE session-reset correlation
+- best-effort FRITZ!Box CPU-temperature telemetry with 24 h history/statistics where supported
 
-The immediate priority is to harden this baseline through real-world compatibility reports rather than rapidly adding new features.
+The immediate priority is to harden this baseline through real-world compatibility reports and better evidence surfaces rather than rapidly adding unrelated features.
 
 ## Near term
 
@@ -41,12 +44,13 @@ Keep vendor-specific code out of the generic monitoring core and define a small,
 - WAN transport
 - WAN/public IP where available
 - vendor event/log context around incidents
+- optional health/physical-link metrics exposed by the adapter
 
 This should be completed before adding several router vendors.
 
 ### 3. Improve failure evidence, not just alert volume
 
-Prioritize changes that make an incident easier to explain after the fact, including clearer event context, exports and regression coverage for ambiguous failure cases.
+Prioritize changes that make an incident easier to explain after the fact. Current follow-up work is tracked in [#11](https://github.com/LucaXTech/UplinkWitness/issues/11) and includes router-agnostic IPv4/IPv6/path diagnostics plus optional physical-WAN evidence where a router exposes it.
 
 ### 4. Complete the brand transition without breaking upgrades
 
