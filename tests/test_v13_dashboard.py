@@ -42,6 +42,7 @@ class V13DashboardTests(unittest.TestCase):
         self.assertIn("UplinkWitness Wallboard", html)
         self.assertIn("/api/status", html)
         self.assertIn("/api/history?hours=24", html)
+        self.assertIn("quality_recent", html)
 
     def test_main_dashboard_links_wallboard_and_v13_diagnostics(self):
         template = (
@@ -49,8 +50,9 @@ class V13DashboardTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn('href="/wallboard"', template)
         self.assertIn("wan_physical_status", template)
-        self.assertIn("quality_24h", template)
+        self.assertIn("quality_recent", template)
         self.assertIn("ipv6_ok", template)
+        self.assertNotIn("quality_24h", template)
 
 
 if __name__ == "__main__":
