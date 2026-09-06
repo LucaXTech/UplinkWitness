@@ -46,6 +46,8 @@ Where safe and practical, test one fault at a time and restore connectivity afte
 
 Confirm each event opens and closes with a sensible duration and appears in the dashboard/export.
 
+For an incident that changes character while it is still open, confirm the existing event is escalated to the strongest observed classification rather than creating duplicate downtime rows.
+
 ## FRITZ!Box enhanced mode
 
 On a compatible FRITZ!Box, configure TR-064 credentials and verify:
@@ -54,12 +56,20 @@ On a compatible FRITZ!Box, configure TR-064 credentials and verify:
 - router uptime and WAN uptime are populated
 - WAN status is available
 - generic Internet probes continue to work when TR-064 temporarily fails
+- router-reported WAN IP and the external public-IP probe are tracked as separate sources
+- a telemetry-source disappearance/reappearance does not create a false `WAN_IP_CHANGED` event
+- CPU temperature is shown only when the router/firmware exposes a valid reading
+- the 24 h temperature panel/history remains absent or nullable when temperature telemetry is unsupported
 
-Do not deliberately reboot production networking equipment just to complete this checklist unless disruption is acceptable.
+When a real reboot is observed, verify the router-uptime reset is detected and correlated with the outage containing the estimated router boot time. Do not deliberately reboot production networking equipment just to complete this checklist unless disruption is acceptable.
 
-## Persistence
+Temperature is supporting evidence only. A high reading by itself must not be reported as the cause of a reboot.
+
+## Persistence and migration
 
 Reboot the Linux host and verify the monitor/dashboard return automatically and the previous SQLite history is preserved.
+
+When upgrading an older database, verify the nullable temperature column is added in place and existing samples/events remain readable.
 
 ## Report compatibility
 
