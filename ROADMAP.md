@@ -4,43 +4,56 @@ UplinkWitness is intentionally developed as a small, dependable Internet-connect
 
 The roadmap is ordered by reliability and evidence quality first, feature count second.
 
-## Stable baseline — v1.2.x
+## Validated baseline — v1.3
 
-The current stable baseline provides:
+The current validated baseline provides:
 
 - vendor-neutral Linux monitoring
 - physical/link carrier detection where Linux exposes it
-- gateway, Internet, DNS and HTTP probes
+- gateway, Internet, DNS, HTTP and independent TCP-connect evidence
+- IPv6 reachability when the host has an IPv6 default route
+- recent rolling ICMP packet-loss and jitter evidence derived from every live probe
+- interface speed/duplex, gateway-neighbour state and explicit default-route/interface changes
 - source-separated public-IP and router-WAN-IP change tracking
 - outage classification with in-place escalation to stronger evidence
 - local SQLite history and incident bundles
-- responsive dashboard and ISP-oriented reports
+- responsive dashboard, ISP-oriented reports and a dependency-free `/wallboard`
+- a documented router-adapter boundary that keeps vendor-specific access outside the generic core
 - optional FRITZ!Box/TR-064 telemetry for deeper WAN diagnostics
 - FRITZ!Box reboot and WAN/PPPoE session-reset correlation
 - best-effort FRITZ!Box CPU-temperature telemetry with 24 h history/statistics where supported
+- `WANCommonInterfaceConfig` access type / physical-link evidence and Online Monitor activity/sync context
+- active-only `X_AVM-DE_WANFiber` optical diagnostics when the actual WAN medium is fiber
 
-## v1.3 development milestone — richer evidence surfaces
+TCP and IPv6 are auxiliary evidence sampled at their own cadence; cached auxiliary results must not mask a current outage classification. Unsupported router fields remain nullable and generic monitoring must continue without router credentials.
 
-The v1.3 development target groups the next diagnostic work into one coherent release instead of adding isolated probes one at a time.
+### Physical validation
 
-### Generic Linux evidence
+The v1.3 evidence surface passed the maintainer validation on the ARM64 Raspberry Pi / Debian 13 + FRITZ!Box 5530 / FRITZ!OS 8.20 external-ONT deployment before promotion.
 
-- independent TCP-connect evidence alongside ICMP/DNS/HTTP
-- IPv6 reachability when the host has an IPv6 default route
-- interface speed/duplex when exposed by Linux sysfs
-- gateway neighbour/ARP state
-- explicit default-route/interface changes, including disappearance/restoration
-- recent ICMP packet-loss and jitter evidence derived from every live probe in a rolling window
+The validation confirmed:
 
-TCP and IPv6 are auxiliary evidence sampled at their own cadence; cached auxiliary results must not mask a current outage classification. These features remain best-effort and must not require router credentials.
+- CI green on the supported Python matrix
+- in-place SQLite migration on the existing deployment
+- 51/51 Raspberry Pi unit tests
+- healthy TCP and IPv6 evidence
+- populated live-probe loss/jitter, host link and neighbour evidence
+- WANCommon `Ethernet / Up` on the real external-ONT topology
+- live WAN activity and `ATA` sync context
+- WANFiber optical fields remaining null despite the router advertising the service, because fiber is not the active FRITZ!Box WAN medium
+- dashboard, `/wallboard`, ISP report and CSV endpoints working after restart
 
-### Router adapter boundary
+The detailed validation record lives in [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) and [`docs/TESTING.md`](docs/TESTING.md).
+
+## Router adapter boundary
 
 The common adapter contract is documented in [`docs/ROUTER_ADAPTERS.md`](docs/ROUTER_ADAPTERS.md). Vendor-specific access remains outside the generic monitor core and unsupported fields remain nullable.
 
 This boundary is intended to unblock future OpenWrt/MikroTik/UniFi work without copying vendor conditionals into incident classification.
 
-### FRITZ!Box physical WAN diagnostics
+## FRITZ!Box physical WAN diagnostics
+
+The current FRITZ adapter uses:
 
 - `WANCommonInterfaceConfig` as the primary physical-WAN evidence source
 - active WAN access type and physical link status
@@ -52,37 +65,23 @@ This boundary is intended to unblock future OpenWrt/MikroTik/UniFi work without 
 
 Media-specific services remain secondary/model-dependent when they conflict with WANCommon telemetry. Multicast-rate telemetry is not substituted for ordinary downstream activity.
 
-### Dashboard / wallboard
+## Dashboard / wallboard
 
-- expose the new host and WAN evidence in the normal dashboard and ISP report
-- keep the existing mobile layout coherent
-- provide a dependency-free `/wallboard` view intended for large displays and TV browsers such as LG webOS
+The normal dashboard exposes the current host and WAN evidence. `/wallboard` provides a dependency-free large-display view intended for TV browsers such as LG webOS.
 
-Automatic TV browser launch at power-on remains device/platform dependent and is not part of the UplinkWitness guarantee.
-
-## Validation before v1.3 stable
-
-Before a v1.3 release is tagged:
-
-- CI must pass on the supported Python matrix
-- the existing Raspberry Pi / Debian deployment must upgrade its SQLite database in place
-- generic host/TCP/IPv6/link evidence must degrade cleanly when unavailable
-- the FRITZ!Box 5530 / FRITZ!OS 8.20 external-ONT deployment must report WANCommon access type/status without treating the advertised WANFiber service as active fiber
-- WAN activity/sync telemetry must be physically checked against the live router
-- dashboard, `/wallboard`, CSV and ISP exports must remain functional
-- existing v1.2.x outage/reboot/IP/temperature behavior must regress cleanly
-
-The detailed procedure lives in [`docs/TESTING.md`](docs/TESTING.md).
+Automatic TV browser launch at power-on remains device/platform dependent and is not part of the UplinkWitness guarantee. A specific TV model should only be called compatible after it has been physically exercised.
 
 ## Next integrations
 
-After the adapter contract and v1.3 evidence surfaces are stable, candidate enhanced integrations include:
+Candidate enhanced integrations include:
 
 - OpenWrt
 - MikroTik RouterOS
 - UniFi gateways
 
 A vendor is only listed as supported after a real implementation has been validated against actual hardware or a strong external compatibility report. Planned integrations are not advertised as current support.
+
+Other richer diagnostics considered during v1.3 — resolver-specific multi-DNS checks, traceroute/path snapshots, PMTU diagnostics, UPnP IGD/SNMP adapters and media-specific DSL/mobile telemetry — remain intentionally deferred. They should only become focused work when the evidence value justifies the complexity.
 
 ## Packaging and portability
 
