@@ -64,15 +64,15 @@ Replace the package filename with the one produced by `ares-package` or download
     ares-install --device livingroom-tv ./com.lucaxtech.app.uplinkwitness_0.1.0_all.ipk
     ares-launch --device livingroom-tv com.lucaxtech.app.uplinkwitness
 
-The first launch asks for the UplinkWitness server URL. Try:
+The first launch asks for the UplinkWitness server URL. Enter the address shown by `install.sh` on the monitored host, for example:
 
-    http://linewatch.local:8080
+    http://your-host.local:8080
 
-If mDNS is not resolved by the TV, use the Raspberry Pi LAN address instead:
+If mDNS is not resolved by the TV, use the host LAN address instead:
 
     http://192.168.x.x:8080
 
-The server address is stored locally by the TV app and survives normal app restarts.
+The launcher intentionally does not ship with an installation-specific hostname prefilled. The server address is stored locally by the TV app after a successful configuration and survives normal app restarts.
 
 A small **Server settings** button remains available in the launcher shell for the Magic Remote pointer. The Yellow key is also accepted as a shortcut when the launcher shell itself has keyboard focus; it is not relied on as the only recovery path.
 
