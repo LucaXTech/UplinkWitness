@@ -2,6 +2,27 @@
 
 Use this checklist before claiming a Linux distribution or device class as tested with UplinkWitness.
 
+## Latest maintainer validation
+
+The v1.3 diagnostics candidate was exercised on 2026-09-06 at commit `ae00f0d` on the production-like ARM64 Raspberry Pi / Debian 13 deployment with a FRITZ!Box 5530 Fiber running FRITZ!OS 8.20 behind an external ONT connected through Ethernet.
+
+The validation passed:
+
+- 51/51 Raspberry Pi unit tests
+- in-place migration of the existing SQLite database
+- both systemd services active after restart
+- TCP and IPv6 probes healthy
+- recent live-probe ICMP loss/jitter populated
+- host link speed/duplex and gateway-neighbour evidence populated
+- WANCommon access type `Ethernet` and physical state `Up`
+- Online Monitor activity populated with `ATA` sync mode
+- CPU-temperature telemetry still available
+- fiber optical fields null as expected for the external-ONT / Ethernet topology
+- dashboard, `/wallboard`, ISP report and CSV export endpoints successful
+- no recent traceback/exception/failed/critical entries in the monitor or dashboard service logs
+
+This establishes the physical maintainer baseline for the v1.3 evidence surface. It does not claim LG webOS autolaunch behavior or direct-FRITZ fiber optics, because neither was physically exercised in this topology.
+
 ## Fresh install
 
 - Start from a clean Linux installation.
@@ -115,7 +136,9 @@ Open `/wallboard` from a desktop/mobile browser and, where available, the browse
 - recent rolling loss/jitter values match the normal dashboard/API rather than a separate calculation
 - the layout remains readable at TV distance and degrades to a two-column/mobile layout on narrow screens
 
-Automatic browser launch at TV power-on is device/webOS dependent and is not a UplinkWitness guarantee.
+Automatic browser launch at TV power-on is device/webOS dependent and is not an UplinkWitness guarantee.
+
+A successful HTTP response and application-level route test establish that the wallboard is being served correctly, but visual TV-browser compatibility should be recorded separately when a specific TV model is exercised.
 
 ## Persistence and migration
 
