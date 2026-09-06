@@ -34,6 +34,8 @@ class WebOSTVClientTests(unittest.TestCase):
         self.assertIn("uplinkwitness.server", html)
         self.assertIn("/wallboard?webos=1", html)
         self.assertIn("405", html)  # Yellow key
+        self.assertIn('placeholder="http://your-host.local:8080"', html)
+        self.assertNotIn("linewatch.local", html)
         self.assertNotIn("type=\"module\"", html)
 
     def test_tv_wallboard_uses_legacy_safe_surface(self):
