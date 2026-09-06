@@ -24,6 +24,7 @@ class WebOSTVClientTests(unittest.TestCase):
         self.assertEqual(info["resolution"], "1920x1080")
         self.assertEqual(info["icon"], "icon.png")
         self.assertEqual(info["largeIcon"], "largeicon.png")
+        self.assertTrue(info["handlesRelaunch"])
 
     def test_webos_icons_match_lg_test_sizes(self):
         self.assertEqual(png_size(WEBOS / "icon.png"), (80, 80))
@@ -37,6 +38,14 @@ class WebOSTVClientTests(unittest.TestCase):
         self.assertIn('placeholder="http://your-host.local:8080"', html)
         self.assertNotIn("linewatch.local", html)
         self.assertNotIn("type=\"module\"", html)
+
+    def test_launcher_accepts_server_launch_parameter(self):
+        html = (WEBOS / "index.html").read_text(encoding="utf-8")
+        self.assertIn("webOSLaunch", html)
+        self.assertIn("webOSRelaunch", html)
+        self.assertIn("PalmSystem.launchParams", html)
+        self.assertIn("detail.server", html)
+        self.assertIn("openServer(detail.server)", html)
 
     def test_devmode_renewal_uses_current_cli_launch_flow(self):
         script = (WEBOS / "renew-devmode.sh").read_text(encoding="utf-8")
