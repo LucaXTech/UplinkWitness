@@ -61,6 +61,9 @@ class WebOSTVClientTests(unittest.TestCase):
         for marker in ("Overview", "Network", "Router", "Incidents", "/api/status", "/api/history?hours=24", "/api/events?limit=30"):
             self.assertIn(marker, html)
         self.assertIn("XMLHttpRequest", html)
+        self.assertIn("webos=1", html)
+        self.assertIn("html.webos #view-overview", html)
+        self.assertIn("padding-bottom:18px", html)
         self.assertNotIn("display:grid", html)
         self.assertNotIn("fetch(", html)
         self.assertNotIn("=>", html)
