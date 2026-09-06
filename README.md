@@ -28,7 +28,7 @@ It works with ordinary routers in **generic Linux mode** and becomes more diagno
   <img src="docs/screenshots/dashboard-mobile.png" alt="UplinkWitness mobile dashboard" width="360">
 </p>
 
-> The screenshots currently show the FRITZ!Box-enhanced dashboard. In generic mode, FRITZ-specific cards are replaced by gateway and generic connectivity diagnostics. Screenshots from v1.1 may still show the former LineWatch name while the rebrand is being completed.
+> The screenshots show the FRITZ!Box-enhanced dashboard. In generic mode, FRITZ-specific cards are replaced by gateway and generic connectivity diagnostics.
 
 ## Why UplinkWitness?
 
@@ -62,7 +62,10 @@ This is particularly useful for short or intermittent faults that disappear befo
 | Router uptime / reboot detection | — | ✅ |
 | WAN-session uptime | — | ✅ |
 | WAN / PPPoE reset detection | — | ✅ |
+| Router CPU-temperature telemetry | — | ✅* |
 | FRITZ!Box event log around incidents | — | ✅ |
+
+`*` Best-effort and model/firmware dependent.
 
 `LINEWATCH_ROUTER_MODE=auto` selects FRITZ!Box enhanced mode when credentials are configured; otherwise it runs generically.
 
@@ -84,11 +87,14 @@ UplinkWitness does **not** assume that every router or Internet path answers ICM
 ### With FRITZ!Box telemetry
 
 - FRITZ!Box reboot through router-uptime reset
+- correlation of a confirmed reboot with the outage that contains the estimated router boot time
 - WAN / PPPoE session reset without a router reboot
 - WAN connection state
-- WAN IP and transport details
+- source-separated router WAN IP tracking
+- WAN transport details
 - PPPoE access concentrator when exposed
 - FRITZ!Box device logs around incidents when available
+- best-effort CPU-temperature telemetry with 24 h min / average / max and trend history where supported
 
 ## Dashboard
 
@@ -97,6 +103,7 @@ The responsive local dashboard provides:
 - current connection health
 - automatic generic / FRITZ-enhanced presentation
 - latency with 24 h min / average / P95 / max
+- FRITZ!Box CPU-temperature trend with current / min / average / max when available
 - outage counters and downtime statistics
 - observed-period availability
 - event timeline
@@ -122,7 +129,7 @@ The automatic installer currently targets systems with `apt` and `systemd`, incl
 
 ## Compatibility status
 
-v1.1.0 has been validated on a physical ARM64 Raspberry Pi running Debian 13, including a controlled Ethernet disconnect/recovery test in generic mode. FRITZ!Box enhanced mode has been validated with a FRITZ!Box 5530 Fiber on FRITZ!OS 8.20 and PPPoE. WSL2/Ubuntu on x86_64 is also used for generic/install regression testing.
+The v1.2.x baseline has been validated on a physical ARM64 Raspberry Pi running Debian 13. Generic mode includes a controlled Ethernet disconnect/recovery test. FRITZ!Box enhanced mode has been validated with a FRITZ!Box 5530 Fiber on FRITZ!OS 8.20 and PPPoE, including reboot detection/correlation, backwards-compatible SQLite migration and CPU-temperature telemetry. WSL2/Ubuntu on x86_64 is also used for generic/install regression testing.
 
 See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for the current matrix and [docs/TESTING.md](docs/TESTING.md) for the validation checklist. Compatibility reports from other Linux machines and router models are especially useful.
 
