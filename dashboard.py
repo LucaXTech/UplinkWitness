@@ -39,6 +39,10 @@ LABELS_IT = {
     "FRITZBOX_REBOOT_DETECTED": "Riavvio FRITZ!Box rilevato",
     "WAN_SESSION_RESET_DETECTED": "Reset sessione WAN/PPPoE",
     "WAN_IP_CHANGED": "Cambio IP WAN/pubblico",
+    "WAN_PHYSICAL_LINK_CHANGED": "Cambio stato collegamento WAN fisico",
+    "WAN_ACCESS_TYPE_CHANGED": "Cambio tipo accesso WAN",
+    "DEFAULT_ROUTE_CHANGED": "Cambio route predefinita",
+    "HOST_LINK_PROPERTIES_CHANGED": "Cambio proprietà link host",
     "ETHERNET_LINK_DOWN": "Collegamento Ethernet caduto",
     "ROUTER_UNREACHABLE": "Router non raggiungibile",
     "NETWORK_LINK_DOWN": "Collegamento di rete caduto",
@@ -53,6 +57,10 @@ LABELS_EN = {
     "FRITZBOX_REBOOT_DETECTED": "FRITZ!Box reboot detected",
     "WAN_SESSION_RESET_DETECTED": "WAN/PPPoE session reset",
     "WAN_IP_CHANGED": "WAN/public IP changed",
+    "WAN_PHYSICAL_LINK_CHANGED": "Physical WAN link changed",
+    "WAN_ACCESS_TYPE_CHANGED": "WAN access type changed",
+    "DEFAULT_ROUTE_CHANGED": "Default route changed",
+    "HOST_LINK_PROPERTIES_CHANGED": "Host link properties changed",
     "ETHERNET_LINK_DOWN": "Ethernet link down",
     "ROUTER_UNREACHABLE": "Router unreachable",
     "NETWORK_LINK_DOWN": "Network link down",
@@ -62,6 +70,25 @@ LABELS_EN = {
     "DNS_FAILURE": "DNS failure",
     "HTTP_CONNECTIVITY_FAILURE": "Web connectivity failure",
 }
+
+OPTIONAL_HISTORY_COLUMNS = (
+    "router_cpu_temp_c",
+    "tcp_ok",
+    "tcp_ms",
+    "ipv6_ok",
+    "ipv6_ms",
+    "interface_speed_mbps",
+    "interface_duplex",
+    "gateway_neighbor_state",
+    "wan_access_type",
+    "wan_physical_status",
+    "wan_down_bytes_s",
+    "wan_up_bytes_s",
+    "wan_sync_group",
+    "wan_sync_mode",
+    "fiber_rx_dbm",
+    "fiber_tx_dbm",
+)
 
 
 def db():
@@ -97,6 +124,21 @@ def fmt_duration(seconds):
     if mins:
         return f"{mins}m {secs}s"
     return f"{secs}s"
+
+
+def format_rate(value):
+    if value is None:
+        return "-"
+    try:
+        value = float(value)
+    except Exception:
+        return "-"
+    units = ("B/s", "KB/s", "MB/s", "GB/s")
+    index = 0
+    while abs(value) >= 1000 and index < len(units) - 1:
+        value /= 1000.0
+        index += 1
+    return f"{value:.1f} {units[index]}"
 
 
 def since_iso(days):
@@ -166,6 +208,32 @@ def latency_stats(conn, hours=24):
     }
 
 
+def link_quality_stats(conn, hours=24):
+    """Return ICMP loss and mean absolute successive latency delta as jitter evidence."""
+    since = (
+        datetime.now(timezone.utc) - timedelta(hours=hours)
+    ).astimezone().isoformat(timespec="seconds")
+    rows = conn.execute(
+        "SELECT internet_ok,internet_ms FROM samples WHERE ts >= ? ORDER BY ts ASC",
+        (since,),
+    ).fetchall()
+    if not rows:
+        return {"loss_pct": None, "jitter_ms": None, "samples": 0}
+    total = len(rows)
+    successes = [
+        float(row["internet_ms"])
+        for row in rows
+        if row["internet_ok"] == 1 and row["internet_ms"] is not None
+    ]
+    loss = 100.0 * (total - sum(1 for row in rows if row["internet_ok"] == 1)) / total
+    deltas = [abs(b - a) for a, b in zip(successes, successes[1:])]
+    return {
+        "loss_pct": round(loss, 2),
+        "jitter_ms": round(sum(deltas) / len(deltas), 2) if deltas else None,
+        "samples": total,
+    }
+
+
 def temperature_stats(conn, hours=24):
     if not has_column(conn, "samples", "router_cpu_temp_c"):
         return {"min": None, "avg": None, "max": None, "samples": 0}
@@ -199,15 +267,15 @@ def temperature_stats(conn, hours=24):
 
 
 def history_rows(conn, since):
-    temp_expr = (
-        "router_cpu_temp_c"
-        if has_column(conn, "samples", "router_cpu_temp_c")
-        else "NULL AS router_cpu_temp_c"
-    )
+    optional = []
+    for column in OPTIONAL_HISTORY_COLUMNS:
+        optional.append(
+            column if has_column(conn, "samples", column) else f"NULL AS {column}"
+        )
     return conn.execute(
         f"""
         SELECT ts, gateway_ms, internet_ms, gateway_ok, internet_ok,
-               dns_ok, http_ok, wan_status, {temp_expr}
+               dns_ok, http_ok, wan_status, {','.join(optional)}
         FROM samples
         WHERE ts >= ?
         ORDER BY ts ASC
@@ -230,6 +298,8 @@ def fritz_telemetry_present(sample):
             "wan_ip",
             "fritz_error",
             "router_cpu_temp_c",
+            "wan_access_type",
+            "wan_physical_status",
         )
     )
 
@@ -237,6 +307,11 @@ def fritz_telemetry_present(sample):
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/wallboard")
+def wallboard():
+    return render_template("wallboard.html")
 
 
 @app.route("/api/status")
@@ -259,7 +334,6 @@ def api_status():
         requested_start = now_dt - timedelta(days=days)
         observed_start = max(requested_start, first_sample_dt or requested_start)
         observed_s = max(1.0, (now_dt - observed_start).total_seconds())
-
         rows = conn.execute(
             """
             SELECT event_type, start_ts, end_ts, duration_s
@@ -312,13 +386,8 @@ def api_status():
         }
 
     last_reboot = conn.execute(
-        """
-        SELECT * FROM events
-        WHERE event_type='FRITZBOX_REBOOT_DETECTED'
-        ORDER BY start_ts DESC LIMIT 1
-        """
+        "SELECT * FROM events WHERE event_type='FRITZBOX_REBOOT_DETECTED' ORDER BY start_ts DESC LIMIT 1"
     ).fetchone()
-
     outage_placeholders = ",".join("?" for _ in OUTAGE_TYPES)
     last_problem = conn.execute(
         f"SELECT * FROM events WHERE event_type IN ({outage_placeholders}) ORDER BY start_ts DESC LIMIT 1",
@@ -366,7 +435,6 @@ def api_status():
             )
 
     fritz_enhanced = fritz_telemetry_present(sample)
-    temp_stats = temperature_stats(conn, 24)
     payload = {
         "ready": True,
         "current_ok": current_ok,
@@ -381,7 +449,7 @@ def api_status():
         "router_uptime": fmt_duration(sample["router_uptime_s"]),
         "router_boot_iso": router_boot_iso,
         "router_cpu_temp_c": row_value(sample, "router_cpu_temp_c"),
-        "router_cpu_temp_24h": temp_stats,
+        "router_cpu_temp_24h": temperature_stats(conn, 24),
         "wan_status": sample["wan_status"],
         "wan_uptime_s": sample["wan_uptime_s"],
         "wan_uptime": fmt_duration(sample["wan_uptime_s"]),
@@ -403,10 +471,36 @@ def api_status():
         "http_ms": sample["http_ms"],
         "carrier": sample["carrier"],
         "fritz_error": sample["fritz_error"],
+        "tcp_ok": row_value(sample, "tcp_ok"),
+        "tcp_ms": row_value(sample, "tcp_ms"),
+        "ipv6_ok": row_value(sample, "ipv6_ok"),
+        "ipv6_ms": row_value(sample, "ipv6_ms"),
+        "interface_speed_mbps": row_value(sample, "interface_speed_mbps"),
+        "interface_duplex": row_value(sample, "interface_duplex"),
+        "gateway_neighbor_state": row_value(sample, "gateway_neighbor_state"),
+        "wan_access_type": row_value(sample, "wan_access_type"),
+        "wan_physical_status": row_value(sample, "wan_physical_status"),
+        "wan_down_bytes_s": row_value(sample, "wan_down_bytes_s"),
+        "wan_up_bytes_s": row_value(sample, "wan_up_bytes_s"),
+        "wan_down_rate": format_rate(row_value(sample, "wan_down_bytes_s")),
+        "wan_up_rate": format_rate(row_value(sample, "wan_up_bytes_s")),
+        "wan_sync_group": row_value(sample, "wan_sync_group"),
+        "wan_sync_mode": row_value(sample, "wan_sync_mode"),
+        "fiber_rx_dbm": row_value(sample, "fiber_rx_dbm"),
+        "fiber_tx_dbm": row_value(sample, "fiber_tx_dbm"),
+        "fiber_rx_low_dbm": row_value(sample, "fiber_rx_low_dbm"),
+        "fiber_rx_high_dbm": row_value(sample, "fiber_rx_high_dbm"),
+        "fiber_tx_low_dbm": row_value(sample, "fiber_tx_low_dbm"),
+        "fiber_tx_high_dbm": row_value(sample, "fiber_tx_high_dbm"),
+        "fiber_mode": row_value(sample, "fiber_mode"),
+        "fiber_resyncs": row_value(sample, "fiber_resyncs"),
+        "fiber_errors_rx": row_value(sample, "fiber_errors_rx"),
+        "fiber_errors_tx": row_value(sample, "fiber_errors_tx"),
         "last_reboot": event_row(last_reboot) if last_reboot else None,
         "last_problem": event_row(last_problem) if last_problem else None,
         "windows": windows,
         "latency_24h": latency_stats(conn, 24),
+        "quality_24h": link_quality_stats(conn, 24),
         "outage_stats": outage_stats,
     }
     conn.close()
@@ -433,11 +527,9 @@ def api_history():
     conn = db()
     rows = history_rows(conn, since)
     conn.close()
-
     if len(rows) > 1200:
         step = max(1, len(rows) // 1200)
         rows = rows[::step]
-
     return jsonify([dict(row) for row in rows])
 
 
@@ -448,8 +540,7 @@ def export_events():
     rows = conn.execute(
         """
         SELECT id,start_ts,end_ts,duration_s,event_type,details_json
-        FROM events WHERE start_ts >= ?
-        ORDER BY start_ts ASC
+        FROM events WHERE start_ts >= ? ORDER BY start_ts ASC
         """,
         (since_iso(days),),
     ).fetchall()
@@ -482,13 +573,10 @@ def export_events():
                 row["details_json"],
             ]
         )
-
     return Response(
         "\ufeff" + buf.getvalue(),
         mimetype="text/csv; charset=utf-8",
-        headers={
-            "Content-Disposition": f'attachment; filename="linewatch_events_{days}days.csv"'
-        },
+        headers={"Content-Disposition": f'attachment; filename="linewatch_events_{days}days.csv"'},
     )
 
 
@@ -513,8 +601,8 @@ def export_isp():
     downtime = sum(float(row["duration_s"] or 0) for row in outages)
     enhanced = fritz_telemetry_present(sample)
     temp = row_value(sample, "router_cpu_temp_c")
-
     generated = datetime.now().astimezone().isoformat(timespec="seconds")
+
     if lang == "en":
         lines = [
             "UPLINKWITNESS - ISP CONNECTION DIAGNOSTIC REPORT",
@@ -527,12 +615,19 @@ def export_isp():
             lines += [
                 f"Gateway: {sample['gateway'] or '-'}",
                 f"Public IP: {sample['public_ip'] or '-'}",
+                f"Host link: {row_value(sample, 'interface_speed_mbps') or '-'} Mbps / {row_value(sample, 'interface_duplex') or '-'}",
+                f"Gateway neighbour state: {row_value(sample, 'gateway_neighbor_state') or '-'}",
+                f"IPv6 probe: {row_value(sample, 'ipv6_ok') if row_value(sample, 'ipv6_ok') is not None else '-'}",
+                f"TCP probe: {row_value(sample, 'tcp_ms') if row_value(sample, 'tcp_ok') else '-'} ms",
             ]
             if enhanced:
                 lines += [
                     f"Router: {sample['router_model'] or '-'}",
                     f"FRITZ!OS: {sample['fritzos'] or '-'}",
                     f"Current WAN status: {sample['wan_status'] or '-'}",
+                    f"Physical WAN: {row_value(sample, 'wan_access_type') or '-'} / {row_value(sample, 'wan_physical_status') or '-'}",
+                    f"WAN activity: down {format_rate(row_value(sample, 'wan_down_bytes_s'))} / up {format_rate(row_value(sample, 'wan_up_bytes_s'))}",
+                    f"WAN sync: {row_value(sample, 'wan_sync_group') or '-'} / {row_value(sample, 'wan_sync_mode') or '-'}",
                     f"Current router uptime: {fmt_duration(sample['router_uptime_s'])}",
                     f"Current WAN uptime: {fmt_duration(sample['wan_uptime_s'])}",
                     f"Current WAN IP: {sample['wan_ip'] or '-'}",
@@ -540,6 +635,12 @@ def export_isp():
                     f"Transport: {sample['wan_transport'] or '-'}",
                     f"PPPoE AC/PoP: {sample['pppoe_ac_name'] or '-'}",
                 ]
+                if row_value(sample, "fiber_rx_dbm") is not None:
+                    lines += [
+                        f"Fiber mode: {row_value(sample, 'fiber_mode') or '-'}",
+                        f"Fiber RX optical level: {row_value(sample, 'fiber_rx_dbm')} dBm",
+                        f"Fiber TX optical level: {row_value(sample, 'fiber_tx_dbm')} dBm",
+                    ]
             lines.append("")
         if enhanced:
             lines += [
@@ -565,12 +666,19 @@ def export_isp():
             lines += [
                 f"Gateway: {sample['gateway'] or '-'}",
                 f"IP pubblico: {sample['public_ip'] or '-'}",
+                f"Link host: {row_value(sample, 'interface_speed_mbps') or '-'} Mbps / {row_value(sample, 'interface_duplex') or '-'}",
+                f"Stato neighbor gateway: {row_value(sample, 'gateway_neighbor_state') or '-'}",
+                f"Probe IPv6: {row_value(sample, 'ipv6_ok') if row_value(sample, 'ipv6_ok') is not None else '-'}",
+                f"Probe TCP: {row_value(sample, 'tcp_ms') if row_value(sample, 'tcp_ok') else '-'} ms",
             ]
             if enhanced:
                 lines += [
                     f"Router: {sample['router_model'] or '-'}",
                     f"FRITZ!OS: {sample['fritzos'] or '-'}",
                     f"Stato WAN attuale: {sample['wan_status'] or '-'}",
+                    f"WAN fisica: {row_value(sample, 'wan_access_type') or '-'} / {row_value(sample, 'wan_physical_status') or '-'}",
+                    f"Attività WAN: down {format_rate(row_value(sample, 'wan_down_bytes_s'))} / up {format_rate(row_value(sample, 'wan_up_bytes_s'))}",
+                    f"Sync WAN: {row_value(sample, 'wan_sync_group') or '-'} / {row_value(sample, 'wan_sync_mode') or '-'}",
                     f"Uptime router attuale: {fmt_duration(sample['router_uptime_s'])}",
                     f"Uptime WAN attuale: {fmt_duration(sample['wan_uptime_s'])}",
                     f"IP WAN attuale: {sample['wan_ip'] or '-'}",
@@ -578,6 +686,12 @@ def export_isp():
                     f"Trasporto: {sample['wan_transport'] or '-'}",
                     f"PPPoE AC/PoP: {sample['pppoe_ac_name'] or '-'}",
                 ]
+                if row_value(sample, "fiber_rx_dbm") is not None:
+                    lines += [
+                        f"Modalità fibra: {row_value(sample, 'fiber_mode') or '-'}",
+                        f"Livello ottico RX fibra: {row_value(sample, 'fiber_rx_dbm')} dBm",
+                        f"Livello ottico TX fibra: {row_value(sample, 'fiber_tx_dbm')} dBm",
+                    ]
             lines.append("")
         if enhanced:
             lines += [
