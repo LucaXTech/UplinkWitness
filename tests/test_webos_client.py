@@ -38,6 +38,15 @@ class WebOSTVClientTests(unittest.TestCase):
         self.assertNotIn("linewatch.local", html)
         self.assertNotIn("type=\"module\"", html)
 
+    def test_devmode_renewal_uses_current_cli_launch_flow(self):
+        script = (WEBOS / "renew-devmode.sh").read_text(encoding="utf-8")
+        installer = (WEBOS / "install-renewal-timer.sh").read_text(encoding="utf-8")
+        self.assertIn("com.palmdts.devmode", script)
+        self.assertIn('extend=true', script)
+        self.assertIn("uplinkwitness-webos-renew.timer", installer)
+        self.assertIn("OnUnitActiveSec=7d", installer)
+        self.assertNotIn("192.168.", script + installer)
+
     def test_tv_wallboard_uses_legacy_safe_surface(self):
         html = (ROOT / "templates" / "wallboard.html").read_text(encoding="utf-8")
         for marker in ("Overview", "Network", "Router", "Incidents", "/api/status", "/api/history?hours=24", "/api/events?limit=30"):
