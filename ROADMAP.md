@@ -4,7 +4,7 @@ UplinkWitness is intentionally developed as a small, dependable Internet-connect
 
 The roadmap is ordered by reliability and evidence quality first, feature count second.
 
-## Current baseline — v1.2.x
+## Stable baseline — v1.2.x
 
 The current stable baseline provides:
 
@@ -19,46 +19,63 @@ The current stable baseline provides:
 - FRITZ!Box reboot and WAN/PPPoE session-reset correlation
 - best-effort FRITZ!Box CPU-temperature telemetry with 24 h history/statistics where supported
 
-The immediate priority is to harden this baseline through real-world compatibility reports and better evidence surfaces rather than rapidly adding unrelated features.
+## v1.3 development milestone — richer evidence surfaces
 
-## Near term
+The v1.3 development target groups the next diagnostic work into one coherent release instead of adding isolated probes one at a time.
 
-### 1. Broaden real-world Linux validation
+### Generic Linux evidence
 
-Collect repeatable compatibility results across:
+- independent TCP-connect evidence alongside ICMP/DNS/HTTP
+- IPv6 reachability when the host has an IPv6 default route
+- interface speed/duplex when exposed by Linux sysfs
+- gateway neighbour/ARP state
+- explicit default-route/interface changes
+- ICMP packet-loss and jitter windows derived from observed samples
 
-- Debian and Ubuntu releases
-- Raspberry Pi / ARM64 and x86_64 hardware
-- wired and wireless hosts
-- routers that answer gateway ICMP and routers that do not
+These remain best-effort and must not require router credentials.
 
-The validation procedure lives in [`docs/TESTING.md`](docs/TESTING.md) and verified results are tracked in [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md).
+### Router adapter boundary
 
-### 2. Stabilize the router-adapter boundary
+The common adapter contract is documented in [`docs/ROUTER_ADAPTERS.md`](docs/ROUTER_ADAPTERS.md). Vendor-specific access remains outside the generic monitor core and unsupported fields remain nullable.
 
-Keep vendor-specific code out of the generic monitoring core and define a small, testable contract for optional router telemetry such as:
+This boundary is intended to unblock future OpenWrt/MikroTik/UniFi work without copying vendor conditionals into incident classification.
 
-- router identity / firmware
-- router uptime
-- WAN state and uptime
-- WAN transport
-- WAN/public IP where available
-- vendor event/log context around incidents
-- optional health/physical-link metrics exposed by the adapter
+### FRITZ!Box physical WAN diagnostics
 
-This should be completed before adding several router vendors.
+- `WANCommonInterfaceConfig` as the primary physical-WAN evidence source
+- active WAN access type and physical link status
+- Online Monitor sync group/mode and activity evidence
+- physical-WAN/access-type change events for correlation
+- active-fiber optical diagnostics through `X_AVM-DE_WANFiber` only when the WAN access type actually indicates fiber
+- no persistence of SFP/GPON serial identifiers
 
-### 3. Improve failure evidence, not just alert volume
+Media-specific services remain secondary/model-dependent when they conflict with WANCommon telemetry.
 
-Prioritize changes that make an incident easier to explain after the fact. Current follow-up work is tracked in [#11](https://github.com/LucaXTech/UplinkWitness/issues/11) and includes router-agnostic IPv4/IPv6/path diagnostics plus optional physical-WAN evidence where a router exposes it.
+### Dashboard / wallboard
 
-### 4. Complete the brand transition without breaking upgrades
+- expose the new host and WAN evidence in the normal dashboard and ISP report
+- keep the existing mobile layout coherent
+- provide a dependency-free `/wallboard` view intended for large displays and TV browsers such as LG webOS
 
-The public project is now **UplinkWitness**. Existing runtime identifiers such as `linewatch.service`, `LINEWATCH_*` environment variables and the historical SQLite filename remain intentionally stable for compatibility. Any future internal-identifier migration should be explicit, documented and backward-compatible rather than bundled into the public rename.
+Automatic TV browser launch at power-on remains device/platform dependent and is not part of the UplinkWitness guarantee.
+
+## Validation before v1.3 stable
+
+Before a v1.3 release is tagged:
+
+- CI must pass on the supported Python matrix
+- the existing Raspberry Pi / Debian deployment must upgrade its SQLite database in place
+- generic host/TCP/IPv6/link evidence must degrade cleanly when unavailable
+- the FRITZ!Box 5530 / FRITZ!OS 8.20 external-ONT deployment must report WANCommon access type/status without treating the advertised WANFiber service as active fiber
+- WAN activity/sync telemetry must be physically checked against the live router
+- dashboard, `/wallboard`, CSV and ISP exports must remain functional
+- existing v1.2.x outage/reboot/IP/temperature behavior must regress cleanly
+
+The detailed procedure lives in [`docs/TESTING.md`](docs/TESTING.md).
 
 ## Next integrations
 
-After the adapter contract is stable, candidate enhanced integrations include:
+After the adapter contract and v1.3 evidence surfaces are stable, candidate enhanced integrations include:
 
 - OpenWrt
 - MikroTik RouterOS
