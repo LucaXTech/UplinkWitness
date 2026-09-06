@@ -40,6 +40,8 @@ The expected package name begins with:
 
     com.lucaxtech.app.uplinkwitness_0.1.0_
 
+CI also packages the client and publishes an `uplinkwitness-tv-ipk` workflow artifact so the exact tested IPK can be installed without rebuilding it locally.
+
 ## Register the TV
 
 In the Developer Mode app on the TV, enable Developer Mode and Key Server. Note the TV LAN IP and the six-character passphrase shown by the app.
@@ -57,7 +59,7 @@ Check connectivity:
 
 ## Install and launch
 
-Replace the package filename with the one produced by `ares-package`:
+Replace the package filename with the one produced by `ares-package` or downloaded from CI:
 
     ares-install --device livingroom-tv ./com.lucaxtech.app.uplinkwitness_0.1.0_all.ipk
     ares-launch --device livingroom-tv com.lucaxtech.app.uplinkwitness
@@ -70,7 +72,9 @@ If mDNS is not resolved by the TV, use the Raspberry Pi LAN address instead:
 
     http://192.168.x.x:8080
 
-The server address is stored locally by the TV app and survives normal app restarts. Press the **Yellow** remote key to reopen server settings.
+The server address is stored locally by the TV app and survives normal app restarts.
+
+A small **Server settings** button remains available in the launcher shell for the Magic Remote pointer. The Yellow key is also accepted as a shortcut when the launcher shell itself has keyboard focus; it is not relied on as the only recovery path.
 
 ## TV controls
 
@@ -79,7 +83,7 @@ Inside the UplinkWitness TV interface:
 - Left / Right: switch Overview, Network, Router, Incidents
 - Magic Remote pointer: tabs remain clickable
 - Back while inside a secondary section: return to Overview
-- Yellow: server settings (handled by the launcher shell when it has focus)
+- Magic Remote `Server settings`: reopen the saved-host configuration
 
 ## Compatibility rules
 
@@ -91,7 +95,7 @@ The TV UI intentionally avoids:
 - external JavaScript or CDN dependencies
 - direct monitoring logic on the TV
 
-The graphics target is 1920x1080, which is the webOS graphics resolution used on UHD TV models.
+The graphics target is 1920x1080.
 
 ## Developer Mode renewal
 
