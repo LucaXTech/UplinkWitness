@@ -31,20 +31,21 @@ Configure `LINEWATCH_ROUTER_MODE=generic` and verify:
 - DNS and HTTP checks are healthy
 - public IP is populated
 - IPv6 is probed only when an IPv6 default route exists
-- ICMP loss and jitter evidence are calculated from the observed sample window
+- ICMP loss and jitter evidence are calculated from every live probe in the rolling quality window, not from the lower-frequency persisted sample set
 - FRITZ-specific fields are not presented as available
 
 ## Gateway ICMP behavior
 
 If the gateway answers ping, verify UplinkWitness logs that gateway ICMP is supported.
 
-If the gateway does not answer ping while Internet access works, verify automatic mode disables gateway-based outage classification instead of reporting a false outage. A healthy TCP/DNS/HTTP path must also prevent a failed gateway ping from being treated as a complete Internet outage.
+If the gateway does not answer ping while Internet access works, verify automatic mode disables gateway-based outage classification instead of reporting a false outage. TCP and IPv6 remain auxiliary evidence sampled at their own cadence; a cached auxiliary success must not override a current outage classification from the synchronous core probes.
 
 ## Route and host-link evidence
 
 Where practical, verify:
 
-- a real default-route/interface change creates `DEFAULT_ROUTE_CHANGED`
+- a real default-route/interface replacement creates `DEFAULT_ROUTE_CHANGED`
+- disappearance and restoration of the default route each create one `DEFAULT_ROUTE_CHANGED` evidence event rather than repeating every poll
 - a negotiated host-link speed/duplex change creates `HOST_LINK_PROPERTIES_CHANGED` only when both old and new values are known
 - temporary absence of sysfs speed/duplex while a link is down does not invent a link-property event
 
@@ -83,7 +84,9 @@ If `WANCommonInterfaceConfig` is exposed, verify:
 
 - WAN access type is nullable but meaningful when returned
 - physical link status is nullable but meaningful when returned
-- activity values are treated as bytes/s, matching the FRITZ! TR-064 specification
+- current activity uses the newest value from the documented downstream/upstream utilization series, in bytes/s
+- if those utilization fields are unavailable, Online Monitor `ds_current_bps` / `us_current_bps` provide the fallback activity sample
+- `mc_current_bps` is not substituted for ordinary downstream activity
 - sync group/mode are best-effort diagnostics
 - `WANCommonInterfaceConfig` is the primary physical-WAN evidence source
 - media-specific services such as `WANEthernetLinkConfig` are not treated as authoritative when they contradict WANCommon telemetry
@@ -109,6 +112,7 @@ Open `/wallboard` from a desktop/mobile browser and, where available, the browse
 - the page loads without external JavaScript dependencies
 - status, WAN, physical-WAN, uptime, temperature and availability cards update automatically
 - the 24 h latency graph updates
+- recent rolling loss/jitter values match the normal dashboard/API rather than a separate calculation
 - the layout remains readable at TV distance and degrades to a two-column/mobile layout on narrow screens
 
 Automatic browser launch at TV power-on is device/webOS dependent and is not a UplinkWitness guarantee.
