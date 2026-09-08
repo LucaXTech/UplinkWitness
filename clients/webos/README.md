@@ -99,17 +99,21 @@ The graphics target is 1920x1080.
 
 ## Developer Mode renewal
 
-LG Developer Mode sessions expire unless they are extended. With the current `@webos-tools/cli`, renewal is performed by launching the Developer Mode app with the extension parameter:
+LG Developer Mode sessions expire unless they are extended. UplinkWitness deliberately does **not** automate renewal by launching `com.palmdts.devmode`, because that can bring the Developer Mode app to the foreground and interrupt whatever is being watched on the TV.
 
-    ares-launch --device livingroom-tv com.palmdts.devmode -p "extend=true"
+Instead, the renewal helper stores the Developer Mode session token locally on the Raspberry Pi / Linux host and uses LG's Developer Mode service directly. Scheduled checks therefore do not launch an application on the TV, do not change the active HDMI input or app, and do not wake the TV.
 
-This command has been physically validated on the OLED55E8PLA and returned the displayed remaining session to approximately 1000 hours.
-
-For an always-on Raspberry Pi or Linux host, first register the TV and retrieve its key for the same Linux user that runs UplinkWitness. Then install the included weekly systemd timer:
+The installer needs the TV once to read the current session token over the already configured `ares-novacom` connection:
 
     ./clients/webos/install-renewal-timer.sh livingroom-tv
 
-The installer performs one real renewal before installing anything, copies the renewal helper to `/usr/local/lib/uplinkwitness/`, and enables `uplinkwitness-webos-renew.timer`. The timer renews approximately once per week and also schedules an attempt after the Linux host boots.
+The token is stored at:
+
+    ~/.config/uplinkwitness/webos-devmode-token
+
+with mode `0600`. The helper then checks `CheckDevModeSession.dev` once a week and calls `ResetDevModeSession.dev` only when fewer than 14 days remain. A normal session near 1000 hours therefore does not get reset every week.
+
+The systemd timer runs on Sunday around 04:00 with a randomized delay and is persistent. There is no `OnBootSec` action that launches anything on the TV. If a scheduled check was missed while the Linux host was off, systemd may run the server-side check after the host returns, but that check talks only to LG's service.
 
 Useful checks:
 
@@ -117,4 +121,9 @@ Useful checks:
     sudo systemctl start uplinkwitness-webos-renew.service
     journalctl -u uplinkwitness-webos-renew.service
 
-The timer contains no TV IP address or host-specific UplinkWitness URL. It uses the webOS device alias already registered by `ares-setup-device` for the Linux user.
+A healthy manual run with plenty of time remaining should log something similar to:
+
+    Developer Mode remaining: 999:57:56
+    Renewal not required.
+
+The session token is not printed by the installer or renewal helper. If Developer Mode is disabled/re-enabled, the token changes, or the session expires, rerun the installer while the TV is available so the token can be captured again.
