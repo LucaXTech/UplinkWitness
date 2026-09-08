@@ -47,14 +47,25 @@ class WebOSTVClientTests(unittest.TestCase):
         self.assertIn("detail.server", html)
         self.assertIn("openServer(detail.server)", html)
 
-    def test_devmode_renewal_uses_current_cli_launch_flow(self):
+    def test_devmode_renewal_is_silent_and_server_side(self):
         script = (WEBOS / "renew-devmode.sh").read_text(encoding="utf-8")
         installer = (WEBOS / "install-renewal-timer.sh").read_text(encoding="utf-8")
-        self.assertIn("com.palmdts.devmode", script)
-        self.assertIn('extend=true', script)
+        combined = script + installer
+
+        self.assertIn("CheckDevModeSession.dev", script)
+        self.assertIn("ResetDevModeSession.dev", script)
+        self.assertIn("webos-devmode-token", combined)
+        self.assertIn("WEBOS_RENEW_THRESHOLD_HOURS", script)
+        self.assertIn("ares-novacom", installer)
         self.assertIn("uplinkwitness-webos-renew.timer", installer)
-        self.assertIn("OnUnitActiveSec=7d", installer)
-        self.assertNotIn("192.168.", script + installer)
+        self.assertIn("OnCalendar=Sun *-*-* 04:00:00", installer)
+        self.assertIn("Persistent=true", installer)
+
+        self.assertNotIn("com.palmdts.devmode", combined)
+        self.assertNotIn("ares-launch", combined)
+        self.assertNotIn("OnBootSec=", installer)
+        self.assertNotIn("OnUnitActiveSec=", installer)
+        self.assertNotIn("192.168.", combined)
 
     def test_tv_wallboard_uses_legacy_safe_surface(self):
         html = (ROOT / "templates" / "wallboard.html").read_text(encoding="utf-8")
